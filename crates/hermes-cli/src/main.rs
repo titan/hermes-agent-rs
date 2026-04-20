@@ -29,8 +29,23 @@ use hermes_cron::{
 use hermes_environments::LocalBackend;
 use hermes_gateway::gateway::GatewayConfig as RuntimeGatewayConfig;
 use hermes_gateway::gateway::IncomingMessage as GatewayIncomingMessage;
+use hermes_gateway::platforms::api_server::{ApiServerAdapter, ApiServerConfig};
+use hermes_gateway::platforms::bluebubbles::{BlueBubblesAdapter, BlueBubblesConfig};
+use hermes_gateway::platforms::dingtalk::{DingTalkAdapter, DingTalkConfig};
+use hermes_gateway::platforms::discord::{DiscordAdapter, DiscordConfig};
+use hermes_gateway::platforms::email::{EmailAdapter, EmailConfig};
+use hermes_gateway::platforms::feishu::{FeishuAdapter, FeishuConfig};
+use hermes_gateway::platforms::homeassistant::{HomeAssistantAdapter, HomeAssistantConfig};
+use hermes_gateway::platforms::matrix::{MatrixAdapter, MatrixConfig};
+use hermes_gateway::platforms::mattermost::{MattermostAdapter, MattermostConfig};
+use hermes_gateway::platforms::signal::{SignalAdapter, SignalConfig};
+use hermes_gateway::platforms::slack::{SlackAdapter, SlackConfig};
+use hermes_gateway::platforms::sms::{SmsAdapter, SmsConfig};
 use hermes_gateway::platforms::telegram::{TelegramAdapter, TelegramConfig};
+use hermes_gateway::platforms::webhook::{WebhookAdapter, WebhookConfig};
+use hermes_gateway::platforms::wecom::{WeComAdapter, WeComConfig};
 use hermes_gateway::platforms::weixin::{WeChatAdapter, WeixinConfig};
+use hermes_gateway::platforms::whatsapp::{WhatsAppAdapter, WhatsAppConfig};
 use hermes_gateway::{DmManager, Gateway, GatewayRuntimeContext, SessionManager};
 use hermes_skills::{FileSkillStore, SkillManager};
 use hermes_telemetry::init_telemetry_from_env;
@@ -619,72 +634,7 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                 run_cron_webhook_delivery_loop(cron_rx, webhooks_path_clone).await;
             }));
 
-            if let Some(platform_cfg) = config.platforms.get("telegram") {
-                if platform_cfg.enabled {
-                    if let Some(token) = platform_cfg.token.clone().filter(|t| !t.trim().is_empty())
-                    {
-                        let telegram_config = build_telegram_config(platform_cfg, token);
-                        let telegram_adapter = Arc::new(TelegramAdapter::new(telegram_config)?);
-                        gateway
-                            .register_adapter("telegram", telegram_adapter.clone())
-                            .await;
-                        let gw_clone = gateway.clone();
-                        sidecar_tasks.push(tokio::spawn(async move {
-                            run_telegram_poll_loop(gw_clone, telegram_adapter).await;
-                        }));
-                    } else {
-                        println!(
-                            "Telegram is enabled but token is missing; skipping telegram adapter.\n  Fix: run `hermes auth login telegram` or set `platforms.telegram.token` in config.yaml."
-                        );
-                    }
-                }
-            }
-            if let Some(platform_cfg) = config.platforms.get("weixin") {
-                if platform_cfg.enabled {
-                    let account_id_missing = platform_cfg
-                        .extra
-                        .get("account_id")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .map(|s| s.is_empty())
-                        .unwrap_or(true);
-                    let token_missing = platform_cfg
-                        .token
-                        .as_deref()
-                        .map(str::trim)
-                        .map(|s| s.is_empty())
-                        .unwrap_or(true)
-                        && platform_cfg
-                            .extra
-                            .get("token")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .map(|s| s.is_empty())
-                            .unwrap_or(true);
-                    if account_id_missing {
-                        println!(
-                            "Weixin is enabled but account_id is missing; skipping weixin adapter.\n  Fix: run `hermes auth login weixin --qr` (recommended) or set `platforms.weixin.extra.account_id`."
-                        );
-                    } else if token_missing {
-                        println!(
-                            "Weixin is enabled but token is missing; skipping weixin adapter.\n  Fix: run `hermes auth login weixin --qr` or set `platforms.weixin.token`."
-                        );
-                    } else {
-                        let wx_cfg = WeixinConfig::from_platform_config(platform_cfg);
-                        match WeChatAdapter::new(wx_cfg) {
-                            Ok(adapter) => {
-                                gateway.register_adapter("weixin", Arc::new(adapter)).await;
-                            }
-                            Err(e) => {
-                                println!(
-                                    "Weixin is enabled but failed to initialize: {}\n  Hint: rerun `hermes auth login weixin --qr` and check account file under ~/.hermes/weixin/accounts/.",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            register_gateway_adapters(&config, gateway.clone(), &mut sidecar_tasks).await?;
 
             if gateway.adapter_names().await.is_empty() {
                 println!(
@@ -792,242 +742,398 @@ fn parse_csv_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn normalize_gateway_platform_key(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "telegram" | "tg" => Some("telegram"),
+        "weixin" | "wechat" | "wx" => Some("weixin"),
+        "discord" => Some("discord"),
+        "slack" => Some("slack"),
+        "matrix" => Some("matrix"),
+        "mattermost" | "mm" => Some("mattermost"),
+        "signal" => Some("signal"),
+        "whatsapp" | "wa" => Some("whatsapp"),
+        "dingtalk" => Some("dingtalk"),
+        "feishu" | "lark" => Some("feishu"),
+        "wecom" => Some("wecom"),
+        "bluebubbles" | "imessage" => Some("bluebubbles"),
+        "email" => Some("email"),
+        "sms" => Some("sms"),
+        "homeassistant" | "ha" => Some("homeassistant"),
+        "webhook" => Some("webhook"),
+        "api_server" | "api-server" | "api" => Some("api_server"),
+        _ => None,
+    }
+}
+
+fn enabled_flag(platform: Option<&PlatformConfig>) -> &'static str {
+    if platform.map(|p| p.enabled).unwrap_or(false) {
+        "enabled"
+    } else {
+        "disabled"
+    }
+}
+
+fn set_extra_string_if_nonempty(platform: &mut PlatformConfig, key: &str, value: &str) {
+    let v = value.trim();
+    if !v.is_empty() {
+        platform
+            .extra
+            .insert(key.to_string(), serde_json::Value::String(v.to_string()));
+    }
+}
+
+async fn configure_platform_basic_prompts(
+    disk: &mut hermes_config::GatewayConfig,
+    key: &str,
+) -> Result<(), AgentError> {
+    let p = disk
+        .platforms
+        .entry(key.to_string())
+        .or_insert_with(PlatformConfig::default);
+    p.enabled = true;
+
+    match key {
+        "discord" => {
+            let token = prompt_line("Discord bot token: ").await?;
+            if !token.trim().is_empty() {
+                p.token = Some(token.trim().to_string());
+            }
+            let app_id = prompt_line("Discord application_id (optional): ").await?;
+            set_extra_string_if_nonempty(p, "application_id", &app_id);
+            let allowed =
+                prompt_line("Discord allowed users (comma-separated, optional): ").await?;
+            if !allowed.trim().is_empty() {
+                p.allowed_users = parse_csv_list(&allowed);
+            }
+            let home = prompt_line("Discord home channel (optional): ").await?;
+            if !home.trim().is_empty() {
+                p.home_channel = Some(home.trim().to_string());
+            }
+        }
+        "slack" => {
+            let token = prompt_line("Slack bot token (xoxb-...): ").await?;
+            if !token.trim().is_empty() {
+                p.token = Some(token.trim().to_string());
+            }
+            let app_token = prompt_line("Slack app token (xapp-..., optional): ").await?;
+            set_extra_string_if_nonempty(p, "app_token", &app_token);
+            let socket_mode = prompt_yes_no("Slack use socket_mode?", true).await?;
+            p.extra.insert(
+                "socket_mode".to_string(),
+                serde_json::Value::Bool(socket_mode),
+            );
+        }
+        "matrix" => {
+            let homeserver =
+                prompt_line("Matrix homeserver_url (e.g. https://matrix.org): ").await?;
+            set_extra_string_if_nonempty(p, "homeserver_url", &homeserver);
+            let user_id = prompt_line("Matrix user_id (e.g. @bot:matrix.org): ").await?;
+            set_extra_string_if_nonempty(p, "user_id", &user_id);
+            let token = prompt_line("Matrix access token: ").await?;
+            if !token.trim().is_empty() {
+                p.token = Some(token.trim().to_string());
+            }
+            let room = prompt_line("Matrix home room_id (optional): ").await?;
+            set_extra_string_if_nonempty(p, "room_id", &room);
+        }
+        "mattermost" => {
+            let server_url = prompt_line("Mattermost server_url: ").await?;
+            set_extra_string_if_nonempty(p, "server_url", &server_url);
+            let token = prompt_line("Mattermost bot token: ").await?;
+            if !token.trim().is_empty() {
+                p.token = Some(token.trim().to_string());
+            }
+            let team_id = prompt_line("Mattermost team_id (optional): ").await?;
+            set_extra_string_if_nonempty(p, "team_id", &team_id);
+            let home = prompt_line("Mattermost home channel (optional): ").await?;
+            if !home.trim().is_empty() {
+                p.home_channel = Some(home.trim().to_string());
+            }
+        }
+        "signal" => {
+            let account = prompt_line("Signal phone_number/account (e.g. +15551234567): ").await?;
+            set_extra_string_if_nonempty(p, "phone_number", &account);
+            let api_url = prompt_line("Signal api_url (default http://localhost:8080): ").await?;
+            set_extra_string_if_nonempty(p, "api_url", &api_url);
+        }
+        "whatsapp" => {
+            let token = prompt_line("WhatsApp Cloud API token: ").await?;
+            if !token.trim().is_empty() {
+                p.token = Some(token.trim().to_string());
+            }
+            let phone_id = prompt_line("WhatsApp phone_number_id: ").await?;
+            set_extra_string_if_nonempty(p, "phone_number_id", &phone_id);
+            let verify = prompt_line("WhatsApp verify_token (optional): ").await?;
+            set_extra_string_if_nonempty(p, "verify_token", &verify);
+            let home = prompt_line("WhatsApp home channel (optional): ").await?;
+            if !home.trim().is_empty() {
+                p.home_channel = Some(home.trim().to_string());
+            }
+        }
+        "dingtalk" => {
+            let client_id = prompt_line("DingTalk client_id/appkey: ").await?;
+            set_extra_string_if_nonempty(p, "client_id", &client_id);
+            let client_secret = prompt_line("DingTalk client_secret: ").await?;
+            set_extra_string_if_nonempty(p, "client_secret", &client_secret);
+        }
+        "feishu" => {
+            let app_id = prompt_line("Feishu/Lark app_id: ").await?;
+            set_extra_string_if_nonempty(p, "app_id", &app_id);
+            let app_secret = prompt_line("Feishu/Lark app_secret: ").await?;
+            set_extra_string_if_nonempty(p, "app_secret", &app_secret);
+            let verify = prompt_line("Feishu verification_token (optional): ").await?;
+            set_extra_string_if_nonempty(p, "verification_token", &verify);
+            let encrypt_key = prompt_line("Feishu encrypt_key (optional): ").await?;
+            set_extra_string_if_nonempty(p, "encrypt_key", &encrypt_key);
+        }
+        "wecom" => {
+            let corp_id = prompt_line("WeCom corp_id: ").await?;
+            set_extra_string_if_nonempty(p, "corp_id", &corp_id);
+            let agent_id = prompt_line("WeCom agent_id: ").await?;
+            set_extra_string_if_nonempty(p, "agent_id", &agent_id);
+            let secret = prompt_line("WeCom secret: ").await?;
+            set_extra_string_if_nonempty(p, "secret", &secret);
+        }
+        "bluebubbles" => {
+            let server_url = prompt_line("BlueBubbles server_url: ").await?;
+            set_extra_string_if_nonempty(p, "server_url", &server_url);
+            let password = prompt_line("BlueBubbles password: ").await?;
+            set_extra_string_if_nonempty(p, "password", &password);
+        }
+        "email" => {
+            let username = prompt_line("Email username/address: ").await?;
+            set_extra_string_if_nonempty(p, "username", &username);
+            let password = prompt_line("Email password/app password: ").await?;
+            set_extra_string_if_nonempty(p, "password", &password);
+            let imap_host = prompt_line("Email imap_host: ").await?;
+            set_extra_string_if_nonempty(p, "imap_host", &imap_host);
+            let smtp_host = prompt_line("Email smtp_host: ").await?;
+            set_extra_string_if_nonempty(p, "smtp_host", &smtp_host);
+            let imap_port = prompt_line("Email imap_port (default 993): ").await?;
+            if let Ok(v) = imap_port.trim().parse::<u16>() {
+                p.extra
+                    .insert("imap_port".to_string(), serde_json::Value::from(v));
+            }
+            let smtp_port = prompt_line("Email smtp_port (default 587): ").await?;
+            if let Ok(v) = smtp_port.trim().parse::<u16>() {
+                p.extra
+                    .insert("smtp_port".to_string(), serde_json::Value::from(v));
+            }
+        }
+        "sms" => {
+            let sid = prompt_line("Twilio account_sid: ").await?;
+            set_extra_string_if_nonempty(p, "account_sid", &sid);
+            let auth = prompt_line("Twilio auth_token: ").await?;
+            set_extra_string_if_nonempty(p, "auth_token", &auth);
+            let from = prompt_line("Twilio from_number (E.164): ").await?;
+            set_extra_string_if_nonempty(p, "from_number", &from);
+        }
+        "homeassistant" => {
+            let base_url =
+                prompt_line("HomeAssistant base_url (e.g. http://127.0.0.1:8123): ").await?;
+            set_extra_string_if_nonempty(p, "base_url", &base_url);
+            let token = prompt_line("HomeAssistant long_lived_token: ").await?;
+            if !token.trim().is_empty() {
+                p.token = Some(token.trim().to_string());
+            }
+            let webhook_id = prompt_line("HomeAssistant webhook_id (optional): ").await?;
+            set_extra_string_if_nonempty(p, "webhook_id", &webhook_id);
+        }
+        "webhook" => {
+            let secret = prompt_line("Webhook secret: ").await?;
+            set_extra_string_if_nonempty(p, "secret", &secret);
+            let port = prompt_line("Webhook port (default 9000): ").await?;
+            if let Ok(v) = port.trim().parse::<u16>() {
+                p.extra
+                    .insert("port".to_string(), serde_json::Value::from(v));
+            }
+            let path = prompt_line("Webhook path (default /webhook): ").await?;
+            set_extra_string_if_nonempty(p, "path", &path);
+        }
+        "api_server" => {
+            let host = prompt_line("API server host (default 0.0.0.0): ").await?;
+            set_extra_string_if_nonempty(p, "host", &host);
+            let port = prompt_line("API server port (default 8090): ").await?;
+            if let Ok(v) = port.trim().parse::<u16>() {
+                p.extra
+                    .insert("port".to_string(), serde_json::Value::from(v));
+            }
+            let token = prompt_line("API server auth_token (optional): ").await?;
+            set_extra_string_if_nonempty(p, "auth_token", &token);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 async fn run_gateway_setup(cli: &Cli) -> Result<(), AgentError> {
     println!("Gateway setup wizard");
     println!("--------------------");
-    println!("This wizard configures chat platforms in config.yaml.");
-
-    let setup_weixin = prompt_yes_no("Configure Weixin / WeChat now?", true).await?;
-    let setup_telegram = prompt_yes_no("Configure Telegram now?", false).await?;
-    if !setup_weixin && !setup_telegram {
-        println!("No platform selected. You can rerun with `hermes gateway setup`.");
-        return Ok(());
-    }
-
-    if setup_weixin {
-        run_auth(
-            cli.clone(),
-            Some("login".to_string()),
-            Some("weixin".to_string()),
-            true,
-        )
-        .await?;
-    } else {
-        println!("Skipped Weixin setup.");
-    }
-
-    if setup_telegram {
-        run_auth(
-            cli.clone(),
-            Some("login".to_string()),
-            Some("telegram".to_string()),
-            false,
-        )
-        .await?;
-    } else {
-        println!("Skipped Telegram setup.");
-    }
-
     let cfg_path = hermes_state_root(cli).join("config.yaml");
     let mut disk =
         load_user_config_file(&cfg_path).map_err(|e| AgentError::Config(e.to_string()))?;
-    if setup_weixin {
-        let wx = disk
-            .platforms
-            .entry("weixin".to_string())
-            .or_insert_with(PlatformConfig::default);
-        wx.enabled = true;
-
-        println!();
-        println!("Direct message policy:");
-        println!("  1) pairing (recommended)");
-        println!("  2) open");
-        println!("  3) allowlist");
-        println!("  4) disabled");
-        let dm_choice = prompt_line("Choose [1-4] (default 1): ").await?;
-        match dm_choice.trim() {
-            "2" => {
-                wx.extra.insert(
-                    "dm_policy".to_string(),
-                    serde_json::Value::String("open".to_string()),
-                );
-                wx.extra.insert(
-                    "allow_from".to_string(),
-                    serde_json::Value::Array(Vec::new()),
-                );
-            }
-            "3" => {
-                let current = wx
-                    .extra
-                    .get("allow_from")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    })
-                    .unwrap_or_default();
-                let line = prompt_line(format!(
-                    "Allowed Weixin user IDs (comma-separated, current: {}): ",
-                    if current.is_empty() {
-                        "(none)"
-                    } else {
-                        &current
-                    }
-                ))
-                .await?;
-                let ids = parse_csv_list(&line);
-                wx.extra.insert(
-                    "dm_policy".to_string(),
-                    serde_json::Value::String("allowlist".to_string()),
-                );
-                wx.extra.insert(
-                    "allow_from".to_string(),
-                    serde_json::Value::Array(
-                        ids.into_iter().map(serde_json::Value::String).collect(),
-                    ),
-                );
-            }
-            "4" => {
-                wx.extra.insert(
-                    "dm_policy".to_string(),
-                    serde_json::Value::String("disabled".to_string()),
-                );
-                wx.extra.insert(
-                    "allow_from".to_string(),
-                    serde_json::Value::Array(Vec::new()),
-                );
-            }
-            _ => {
-                wx.extra.insert(
-                    "dm_policy".to_string(),
-                    serde_json::Value::String("pairing".to_string()),
-                );
-                wx.extra.insert(
-                    "allow_from".to_string(),
-                    serde_json::Value::Array(Vec::new()),
-                );
-            }
-        }
-
-        println!();
-        println!("Group message policy:");
-        println!("  1) disabled (recommended)");
-        println!("  2) open");
-        println!("  3) allowlist");
-        let group_choice = prompt_line("Choose [1-3] (default 1): ").await?;
-        match group_choice.trim() {
-            "2" => {
-                wx.extra.insert(
-                    "group_policy".to_string(),
-                    serde_json::Value::String("open".to_string()),
-                );
-                wx.extra.insert(
-                    "group_allow_from".to_string(),
-                    serde_json::Value::Array(Vec::new()),
-                );
-            }
-            "3" => {
-                let current = wx
-                    .extra
-                    .get("group_allow_from")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    })
-                    .unwrap_or_default();
-                let line = prompt_line(format!(
-                    "Allowed Weixin group IDs (comma-separated, current: {}): ",
-                    if current.is_empty() {
-                        "(none)"
-                    } else {
-                        &current
-                    }
-                ))
-                .await?;
-                let ids = parse_csv_list(&line);
-                wx.extra.insert(
-                    "group_policy".to_string(),
-                    serde_json::Value::String("allowlist".to_string()),
-                );
-                wx.extra.insert(
-                    "group_allow_from".to_string(),
-                    serde_json::Value::Array(
-                        ids.into_iter().map(serde_json::Value::String).collect(),
-                    ),
-                );
-            }
-            _ => {
-                wx.extra.insert(
-                    "group_policy".to_string(),
-                    serde_json::Value::String("disabled".to_string()),
-                );
-                wx.extra.insert(
-                    "group_allow_from".to_string(),
-                    serde_json::Value::Array(Vec::new()),
-                );
-            }
-        }
-
-        let home_default = wx.home_channel.clone().unwrap_or_default();
-        let home_input = prompt_line(format!(
-            "Weixin home channel (optional, current: {}): ",
-            if home_default.is_empty() {
-                "(none)"
-            } else {
-                &home_default
-            }
-        ))
-        .await?;
-        if !home_input.trim().is_empty() {
-            wx.home_channel = Some(home_input.trim().to_string());
-        }
+    println!("This wizard configures messaging platforms in config.yaml.");
+    println!("Current platform status:");
+    for (k, label) in [
+        ("weixin", "Weixin"),
+        ("telegram", "Telegram"),
+        ("discord", "Discord"),
+        ("slack", "Slack"),
+        ("matrix", "Matrix"),
+        ("mattermost", "Mattermost"),
+        ("whatsapp", "WhatsApp"),
+        ("signal", "Signal"),
+        ("dingtalk", "DingTalk"),
+        ("feishu", "Feishu"),
+        ("wecom", "WeCom"),
+        ("bluebubbles", "BlueBubbles"),
+        ("email", "Email"),
+        ("sms", "SMS"),
+        ("homeassistant", "HomeAssistant"),
+        ("webhook", "Webhook"),
+        ("api_server", "API Server"),
+    ] {
+        println!("  - {:<13} {}", label, enabled_flag(disk.platforms.get(k)));
+    }
+    println!();
+    println!("Examples: weixin,telegram   or   discord,slack,matrix");
+    let raw = prompt_line(
+        "Platforms to configure (comma-separated, empty defaults to weixin,telegram): ",
+    )
+    .await?;
+    let mut selected: Vec<String> = if raw.trim().is_empty() {
+        vec!["weixin".to_string(), "telegram".to_string()]
+    } else {
+        parse_csv_list(&raw)
+            .into_iter()
+            .filter_map(|k| normalize_gateway_platform_key(&k).map(|v| v.to_string()))
+            .collect()
+    };
+    selected.sort();
+    selected.dedup();
+    if selected.is_empty() {
+        println!("No valid platforms selected.");
+        return Ok(());
     }
 
-    if setup_telegram {
-        let tg = disk
-            .platforms
-            .entry("telegram".to_string())
-            .or_insert_with(PlatformConfig::default);
-        tg.enabled = true;
-
-        let use_polling = prompt_yes_no("Telegram use polling mode?", true).await?;
-        tg.extra
-            .insert("polling".to_string(), serde_json::Value::Bool(use_polling));
-        if use_polling {
-            tg.webhook_url = None;
-        } else {
-            let webhook_default = tg.webhook_url.clone().unwrap_or_default();
-            let webhook_input = prompt_line(format!(
-                "Telegram webhook URL (current: {}): ",
-                if webhook_default.is_empty() {
-                    "(none)"
-                } else {
-                    &webhook_default
+    for key in selected {
+        println!();
+        println!("Configuring {}...", key);
+        match key.as_str() {
+            "weixin" => {
+                run_auth(
+                    cli.clone(),
+                    Some("login".to_string()),
+                    Some("weixin".to_string()),
+                    true,
+                )
+                .await?;
+                disk = load_user_config_file(&cfg_path)
+                    .map_err(|e| AgentError::Config(e.to_string()))?;
+                let wx = disk
+                    .platforms
+                    .entry("weixin".to_string())
+                    .or_insert_with(PlatformConfig::default);
+                wx.enabled = true;
+                println!("Direct message policy: 1)pairing 2)open 3)allowlist 4)disabled");
+                let dm_choice = prompt_line("Choose [1-4] (default 1): ").await?;
+                match dm_choice.trim() {
+                    "2" => {
+                        wx.extra
+                            .insert("dm_policy".to_string(), serde_json::json!("open"));
+                        wx.extra
+                            .insert("allow_from".to_string(), serde_json::json!([]));
+                    }
+                    "3" => {
+                        let ids = parse_csv_list(
+                            &prompt_line("Allowed Weixin user IDs (comma-separated): ").await?,
+                        );
+                        wx.extra
+                            .insert("dm_policy".to_string(), serde_json::json!("allowlist"));
+                        wx.extra.insert(
+                            "allow_from".to_string(),
+                            serde_json::Value::Array(
+                                ids.into_iter().map(serde_json::Value::String).collect(),
+                            ),
+                        );
+                    }
+                    "4" => {
+                        wx.extra
+                            .insert("dm_policy".to_string(), serde_json::json!("disabled"));
+                        wx.extra
+                            .insert("allow_from".to_string(), serde_json::json!([]));
+                    }
+                    _ => {
+                        wx.extra
+                            .insert("dm_policy".to_string(), serde_json::json!("pairing"));
+                        wx.extra
+                            .insert("allow_from".to_string(), serde_json::json!([]));
+                    }
                 }
-            ))
-            .await?;
-            if !webhook_input.trim().is_empty() {
-                tg.webhook_url = Some(webhook_input.trim().to_string());
+                println!("Group policy: 1)disabled 2)open 3)allowlist");
+                let group_choice = prompt_line("Choose [1-3] (default 1): ").await?;
+                match group_choice.trim() {
+                    "2" => {
+                        wx.extra
+                            .insert("group_policy".to_string(), serde_json::json!("open"));
+                        wx.extra
+                            .insert("group_allow_from".to_string(), serde_json::json!([]));
+                    }
+                    "3" => {
+                        let ids = parse_csv_list(
+                            &prompt_line("Allowed Weixin group IDs (comma-separated): ").await?,
+                        );
+                        wx.extra
+                            .insert("group_policy".to_string(), serde_json::json!("allowlist"));
+                        wx.extra.insert(
+                            "group_allow_from".to_string(),
+                            serde_json::Value::Array(
+                                ids.into_iter().map(serde_json::Value::String).collect(),
+                            ),
+                        );
+                    }
+                    _ => {
+                        wx.extra
+                            .insert("group_policy".to_string(), serde_json::json!("disabled"));
+                        wx.extra
+                            .insert("group_allow_from".to_string(), serde_json::json!([]));
+                    }
+                }
+                let home = prompt_line("Weixin home channel (optional): ").await?;
+                if !home.trim().is_empty() {
+                    wx.home_channel = Some(home.trim().to_string());
+                }
             }
-        }
-
-        let tg_home_default = tg.home_channel.clone().unwrap_or_default();
-        let tg_home = prompt_line(format!(
-            "Telegram home channel (optional, current: {}): ",
-            if tg_home_default.is_empty() {
-                "(none)"
-            } else {
-                &tg_home_default
+            "telegram" => {
+                run_auth(
+                    cli.clone(),
+                    Some("login".to_string()),
+                    Some("telegram".to_string()),
+                    false,
+                )
+                .await?;
+                disk = load_user_config_file(&cfg_path)
+                    .map_err(|e| AgentError::Config(e.to_string()))?;
+                let tg = disk
+                    .platforms
+                    .entry("telegram".to_string())
+                    .or_insert_with(PlatformConfig::default);
+                tg.enabled = true;
+                let polling = prompt_yes_no("Telegram use polling mode?", true).await?;
+                tg.extra
+                    .insert("polling".to_string(), serde_json::Value::Bool(polling));
+                if !polling {
+                    let webhook_url = prompt_line("Telegram webhook URL: ").await?;
+                    if !webhook_url.trim().is_empty() {
+                        tg.webhook_url = Some(webhook_url.trim().to_string());
+                    }
+                }
+                let home = prompt_line("Telegram home channel (optional): ").await?;
+                if !home.trim().is_empty() {
+                    tg.home_channel = Some(home.trim().to_string());
+                }
             }
-        ))
-        .await?;
-        if !tg_home.trim().is_empty() {
-            tg.home_channel = Some(tg_home.trim().to_string());
+            other => configure_platform_basic_prompts(&mut disk, other).await?,
         }
     }
 
@@ -1153,6 +1259,473 @@ fn build_telegram_config(
     }
 }
 
+fn platform_token_or_extra(platform_cfg: &PlatformConfig) -> Option<String> {
+    platform_cfg
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            platform_cfg
+                .extra
+                .get("token")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+}
+
+fn extra_string(platform_cfg: &PlatformConfig, key: &str) -> Option<String> {
+    platform_cfg
+        .extra
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+fn extra_bool(platform_cfg: &PlatformConfig, key: &str, default: bool) -> bool {
+    platform_cfg
+        .extra
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
+}
+
+fn extra_u16(platform_cfg: &PlatformConfig, key: &str, default: u16) -> u16 {
+    platform_cfg
+        .extra
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .unwrap_or(default)
+}
+
+async fn register_gateway_adapters(
+    config: &hermes_config::GatewayConfig,
+    gateway: Arc<Gateway>,
+    sidecar_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> Result<(), AgentError> {
+    if let Some(platform_cfg) = config.platforms.get("telegram") {
+        if platform_cfg.enabled {
+            if let Some(token) = platform_cfg.token.clone().filter(|t| !t.trim().is_empty()) {
+                let telegram_config = build_telegram_config(platform_cfg, token);
+                let telegram_adapter = Arc::new(TelegramAdapter::new(telegram_config)?);
+                gateway
+                    .register_adapter("telegram", telegram_adapter.clone())
+                    .await;
+                let gw_clone = gateway.clone();
+                sidecar_tasks.push(tokio::spawn(async move {
+                    run_telegram_poll_loop(gw_clone, telegram_adapter).await;
+                }));
+            } else {
+                println!(
+                    "Telegram is enabled but token is missing; skipping telegram adapter.\n  Fix: run `hermes auth login telegram` or set `platforms.telegram.token` in config.yaml."
+                );
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("weixin") {
+        if platform_cfg.enabled {
+            let account_id_missing = platform_cfg
+                .extra
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .map(|s| s.is_empty())
+                .unwrap_or(true);
+            let token_missing = platform_token_or_extra(platform_cfg).is_none();
+            if account_id_missing {
+                println!(
+                    "Weixin is enabled but account_id is missing; skipping weixin adapter.\n  Fix: run `hermes auth login weixin --qr` (recommended) or set `platforms.weixin.extra.account_id`."
+                );
+            } else if token_missing {
+                println!(
+                    "Weixin is enabled but token is missing; skipping weixin adapter.\n  Fix: run `hermes auth login weixin --qr` or set `platforms.weixin.token`."
+                );
+            } else {
+                let wx_cfg = WeixinConfig::from_platform_config(platform_cfg);
+                match WeChatAdapter::new(wx_cfg) {
+                    Ok(adapter) => {
+                        gateway.register_adapter("weixin", Arc::new(adapter)).await;
+                    }
+                    Err(e) => {
+                        println!(
+                            "Weixin is enabled but failed to initialize: {}\n  Hint: rerun `hermes auth login weixin --qr` and check account file under ~/.hermes/weixin/accounts/.",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("discord") {
+        if platform_cfg.enabled {
+            if let Some(token) = platform_token_or_extra(platform_cfg) {
+                let discord_cfg = DiscordConfig {
+                    token,
+                    application_id: extra_string(platform_cfg, "application_id"),
+                    proxy: Default::default(),
+                    require_mention: platform_cfg.require_mention.unwrap_or(false),
+                    intents: platform_cfg
+                        .extra
+                        .get("intents")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or((1 << 0) | (1 << 9) | (1 << 15)),
+                };
+                match DiscordAdapter::new(discord_cfg) {
+                    Ok(adapter) => gateway.register_adapter("discord", Arc::new(adapter)).await,
+                    Err(e) => println!("Discord enabled but failed to initialize: {}", e),
+                }
+            } else {
+                println!("Discord is enabled but token is missing; skipping discord adapter.");
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("slack") {
+        if platform_cfg.enabled {
+            if let Some(token) = platform_token_or_extra(platform_cfg) {
+                let slack_cfg = SlackConfig {
+                    token,
+                    app_token: extra_string(platform_cfg, "app_token"),
+                    socket_mode: extra_bool(platform_cfg, "socket_mode", false),
+                    proxy: Default::default(),
+                };
+                match SlackAdapter::new(slack_cfg) {
+                    Ok(adapter) => gateway.register_adapter("slack", Arc::new(adapter)).await,
+                    Err(e) => println!("Slack enabled but failed to initialize: {}", e),
+                }
+            } else {
+                println!("Slack is enabled but token is missing; skipping slack adapter.");
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("matrix") {
+        if platform_cfg.enabled {
+            let homeserver_url = extra_string(platform_cfg, "homeserver_url")
+                .or_else(|| extra_string(platform_cfg, "homeserver"))
+                .unwrap_or_default();
+            let user_id = extra_string(platform_cfg, "user_id").unwrap_or_default();
+            let access_token = platform_token_or_extra(platform_cfg)
+                .or_else(|| extra_string(platform_cfg, "access_token"))
+                .unwrap_or_default();
+            if homeserver_url.is_empty() || user_id.is_empty() || access_token.is_empty() {
+                println!(
+                    "Matrix is enabled but homeserver_url/user_id/access_token is incomplete; skipping matrix adapter."
+                );
+            } else {
+                let matrix_cfg = MatrixConfig {
+                    homeserver_url,
+                    user_id,
+                    access_token,
+                    room_id: extra_string(platform_cfg, "room_id"),
+                    proxy: Default::default(),
+                };
+                match MatrixAdapter::new(matrix_cfg) {
+                    Ok(adapter) => gateway.register_adapter("matrix", Arc::new(adapter)).await,
+                    Err(e) => println!("Matrix enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("mattermost") {
+        if platform_cfg.enabled {
+            let token = platform_token_or_extra(platform_cfg).unwrap_or_default();
+            let server_url = extra_string(platform_cfg, "server_url")
+                .or_else(|| extra_string(platform_cfg, "url"))
+                .unwrap_or_default();
+            if token.is_empty() || server_url.is_empty() {
+                println!(
+                    "Mattermost is enabled but server_url/token is missing; skipping mattermost adapter."
+                );
+            } else {
+                let mm_cfg = MattermostConfig {
+                    server_url,
+                    token,
+                    team_id: extra_string(platform_cfg, "team_id"),
+                    proxy: Default::default(),
+                };
+                match MattermostAdapter::new(mm_cfg) {
+                    Ok(adapter) => {
+                        gateway
+                            .register_adapter("mattermost", Arc::new(adapter))
+                            .await
+                    }
+                    Err(e) => println!("Mattermost enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("signal") {
+        if platform_cfg.enabled {
+            let phone_number = extra_string(platform_cfg, "phone_number")
+                .or_else(|| extra_string(platform_cfg, "account"))
+                .unwrap_or_default();
+            if phone_number.is_empty() {
+                println!("Signal is enabled but phone_number is missing; skipping signal adapter.");
+            } else {
+                let signal_cfg = SignalConfig {
+                    phone_number,
+                    api_url: extra_string(platform_cfg, "api_url")
+                        .unwrap_or_else(|| "http://localhost:8080".to_string()),
+                    proxy: Default::default(),
+                };
+                match SignalAdapter::new(signal_cfg) {
+                    Ok(adapter) => gateway.register_adapter("signal", Arc::new(adapter)).await,
+                    Err(e) => println!("Signal enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("whatsapp") {
+        if platform_cfg.enabled {
+            if let Some(token) = platform_token_or_extra(platform_cfg) {
+                let wa_cfg = WhatsAppConfig {
+                    token,
+                    phone_number_id: extra_string(platform_cfg, "phone_number_id"),
+                    business_account_id: extra_string(platform_cfg, "business_account_id"),
+                    verify_token: extra_string(platform_cfg, "verify_token"),
+                    proxy: Default::default(),
+                };
+                match WhatsAppAdapter::new(wa_cfg) {
+                    Ok(adapter) => {
+                        gateway
+                            .register_adapter("whatsapp", Arc::new(adapter))
+                            .await
+                    }
+                    Err(e) => println!("WhatsApp enabled but failed to initialize: {}", e),
+                }
+            } else {
+                println!("WhatsApp is enabled but token is missing; skipping whatsapp adapter.");
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("dingtalk") {
+        if platform_cfg.enabled {
+            let ding_cfg = DingTalkConfig::from_platform_config(platform_cfg);
+            match DingTalkAdapter::new(ding_cfg) {
+                Ok(adapter) => {
+                    gateway
+                        .register_adapter("dingtalk", Arc::new(adapter))
+                        .await
+                }
+                Err(e) => println!("DingTalk enabled but failed to initialize: {}", e),
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("feishu") {
+        if platform_cfg.enabled {
+            let app_id = extra_string(platform_cfg, "app_id").unwrap_or_default();
+            let app_secret = extra_string(platform_cfg, "app_secret").unwrap_or_default();
+            if app_id.is_empty() || app_secret.is_empty() {
+                println!(
+                    "Feishu is enabled but app_id/app_secret is missing; skipping feishu adapter."
+                );
+            } else {
+                let feishu_cfg = FeishuConfig {
+                    app_id,
+                    app_secret,
+                    verification_token: extra_string(platform_cfg, "verification_token"),
+                    encrypt_key: extra_string(platform_cfg, "encrypt_key"),
+                    proxy: Default::default(),
+                };
+                match FeishuAdapter::new(feishu_cfg) {
+                    Ok(adapter) => gateway.register_adapter("feishu", Arc::new(adapter)).await,
+                    Err(e) => println!("Feishu enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("wecom") {
+        if platform_cfg.enabled {
+            let corp_id = extra_string(platform_cfg, "corp_id").unwrap_or_default();
+            let agent_id = extra_string(platform_cfg, "agent_id").unwrap_or_default();
+            let secret = extra_string(platform_cfg, "secret").unwrap_or_default();
+            if corp_id.is_empty() || agent_id.is_empty() || secret.is_empty() {
+                println!(
+                    "WeCom is enabled but corp_id/agent_id/secret is missing; skipping wecom adapter."
+                );
+            } else {
+                let wecom_cfg = WeComConfig {
+                    corp_id,
+                    agent_id,
+                    secret,
+                    proxy: Default::default(),
+                };
+                match WeComAdapter::new(wecom_cfg) {
+                    Ok(adapter) => gateway.register_adapter("wecom", Arc::new(adapter)).await,
+                    Err(e) => println!("WeCom enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("bluebubbles") {
+        if platform_cfg.enabled {
+            let server_url = extra_string(platform_cfg, "server_url").unwrap_or_default();
+            let password = extra_string(platform_cfg, "password").unwrap_or_default();
+            if server_url.is_empty() || password.is_empty() {
+                println!(
+                    "BlueBubbles is enabled but server_url/password is missing; skipping bluebubbles adapter."
+                );
+            } else {
+                let bb_cfg = BlueBubblesConfig {
+                    server_url,
+                    password,
+                    proxy: Default::default(),
+                };
+                match BlueBubblesAdapter::new(bb_cfg) {
+                    Ok(adapter) => {
+                        gateway
+                            .register_adapter("bluebubbles", Arc::new(adapter))
+                            .await
+                    }
+                    Err(e) => println!("BlueBubbles enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("email") {
+        if platform_cfg.enabled {
+            let imap_host = extra_string(platform_cfg, "imap_host").unwrap_or_default();
+            let smtp_host = extra_string(platform_cfg, "smtp_host").unwrap_or_default();
+            let username = extra_string(platform_cfg, "username").unwrap_or_default();
+            let password = extra_string(platform_cfg, "password").unwrap_or_default();
+            if imap_host.is_empty()
+                || smtp_host.is_empty()
+                || username.is_empty()
+                || password.is_empty()
+            {
+                println!(
+                    "Email is enabled but imap/smtp/username/password is incomplete; skipping email adapter."
+                );
+            } else {
+                let email_cfg = EmailConfig {
+                    imap_host,
+                    imap_port: extra_u16(platform_cfg, "imap_port", 993),
+                    smtp_host,
+                    smtp_port: extra_u16(platform_cfg, "smtp_port", 587),
+                    username,
+                    password,
+                    poll_interval_secs: platform_cfg
+                        .extra
+                        .get("poll_interval_secs")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(60),
+                    proxy: Default::default(),
+                };
+                match EmailAdapter::new(email_cfg) {
+                    Ok(adapter) => gateway.register_adapter("email", Arc::new(adapter)).await,
+                    Err(e) => println!("Email enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("sms") {
+        if platform_cfg.enabled {
+            let account_sid = extra_string(platform_cfg, "account_sid").unwrap_or_default();
+            let auth_token = extra_string(platform_cfg, "auth_token").unwrap_or_default();
+            let from_number = extra_string(platform_cfg, "from_number").unwrap_or_default();
+            if account_sid.is_empty() || auth_token.is_empty() || from_number.is_empty() {
+                println!(
+                    "SMS is enabled but account_sid/auth_token/from_number is incomplete; skipping sms adapter."
+                );
+            } else {
+                let sms_cfg = SmsConfig {
+                    provider: extra_string(platform_cfg, "provider")
+                        .unwrap_or_else(|| "twilio".to_string()),
+                    account_sid,
+                    auth_token,
+                    from_number,
+                    proxy: Default::default(),
+                };
+                match SmsAdapter::new(sms_cfg) {
+                    Ok(adapter) => gateway.register_adapter("sms", Arc::new(adapter)).await,
+                    Err(e) => println!("SMS enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("homeassistant") {
+        if platform_cfg.enabled {
+            let base_url = extra_string(platform_cfg, "base_url").unwrap_or_default();
+            let long_lived_token = platform_token_or_extra(platform_cfg)
+                .or_else(|| extra_string(platform_cfg, "long_lived_token"))
+                .unwrap_or_default();
+            if base_url.is_empty() || long_lived_token.is_empty() {
+                println!(
+                    "HomeAssistant is enabled but base_url/token is missing; skipping homeassistant adapter."
+                );
+            } else {
+                let ha_cfg = HomeAssistantConfig {
+                    base_url,
+                    long_lived_token,
+                    webhook_id: extra_string(platform_cfg, "webhook_id"),
+                    proxy: Default::default(),
+                };
+                match HomeAssistantAdapter::new(ha_cfg) {
+                    Ok(adapter) => {
+                        gateway
+                            .register_adapter("homeassistant", Arc::new(adapter))
+                            .await
+                    }
+                    Err(e) => println!("HomeAssistant enabled but failed to initialize: {}", e),
+                }
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("webhook") {
+        if platform_cfg.enabled {
+            let secret = extra_string(platform_cfg, "secret").unwrap_or_default();
+            if secret.is_empty() {
+                println!("Webhook is enabled but secret is missing; skipping webhook adapter.");
+            } else {
+                let wh_cfg = WebhookConfig {
+                    port: extra_u16(platform_cfg, "port", 9000),
+                    path: extra_string(platform_cfg, "path")
+                        .unwrap_or_else(|| "/webhook".to_string()),
+                    secret,
+                };
+                let adapter = WebhookAdapter::new(wh_cfg);
+                gateway.register_adapter("webhook", Arc::new(adapter)).await;
+            }
+        }
+    }
+
+    if let Some(platform_cfg) = config.platforms.get("api_server") {
+        if platform_cfg.enabled {
+            let api_cfg = ApiServerConfig {
+                host: extra_string(platform_cfg, "host").unwrap_or_else(|| "0.0.0.0".to_string()),
+                port: extra_u16(platform_cfg, "port", 8090),
+                auth_token: extra_string(platform_cfg, "auth_token"),
+            };
+            let adapter = ApiServerAdapter::new(api_cfg);
+            gateway
+                .register_adapter("api_server", Arc::new(adapter))
+                .await;
+        }
+    }
+
+    Ok(())
+}
+
 async fn run_telegram_poll_loop(gateway: Arc<Gateway>, adapter: Arc<TelegramAdapter>) {
     loop {
         if !adapter.is_running() {
@@ -1206,18 +1779,52 @@ async fn run_telegram_poll_loop(gateway: Arc<Gateway>, adapter: Arc<TelegramAdap
 ///
 /// Set `HERMES_AUTH_DEFAULT_PROVIDER=telegram` if you primarily use the Telegram gateway.
 fn resolve_auth_provider(provider: Option<String>) -> String {
-    provider
+    let raw = provider
         .filter(|s| !s.trim().is_empty())
         .or_else(|| {
             std::env::var("HERMES_AUTH_DEFAULT_PROVIDER")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
         })
-        .unwrap_or_else(|| "openai".to_string())
+        .unwrap_or_else(|| "openai".to_string());
+    normalize_auth_provider(&raw)
+}
+
+fn normalize_auth_provider(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "wechat" | "wx" => "weixin".to_string(),
+        "tg" => "telegram".to_string(),
+        "api-server" => "api_server".to_string(),
+        "home-assistant" => "homeassistant".to_string(),
+        "mm" => "mattermost".to_string(),
+        "github-copilot" => "copilot".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn gateway_platform_provider_key(provider: &str) -> Option<&'static str> {
+    match provider {
+        "discord" => Some("discord"),
+        "slack" => Some("slack"),
+        "matrix" => Some("matrix"),
+        "mattermost" => Some("mattermost"),
+        "signal" => Some("signal"),
+        "whatsapp" => Some("whatsapp"),
+        "dingtalk" => Some("dingtalk"),
+        "feishu" => Some("feishu"),
+        "wecom" => Some("wecom"),
+        "bluebubbles" => Some("bluebubbles"),
+        "email" => Some("email"),
+        "sms" => Some("sms"),
+        "homeassistant" => Some("homeassistant"),
+        "webhook" => Some("webhook"),
+        "api_server" => Some("api_server"),
+        _ => None,
+    }
 }
 
 fn is_weixin_provider(provider: &str) -> bool {
-    matches!(provider, "weixin" | "wechat" | "wx")
+    provider == "weixin"
 }
 
 fn is_truthy(v: &str) -> bool {
@@ -1712,6 +2319,21 @@ async fn run_auth(
                 );
                 return Ok(());
             }
+            if let Some(platform_key) = gateway_platform_provider_key(&provider) {
+                let cfg_path = hermes_state_root(&cli).join("config.yaml");
+                let mut disk = load_user_config_file(&cfg_path)
+                    .map_err(|e| AgentError::Config(e.to_string()))?;
+                configure_platform_basic_prompts(&mut disk, platform_key).await?;
+                validate_config(&disk).map_err(|e| AgentError::Config(e.to_string()))?;
+                save_config_yaml(&cfg_path, &disk)
+                    .map_err(|e| AgentError::Config(e.to_string()))?;
+                println!(
+                    "{}: config updated and platform enabled in {}",
+                    platform_key,
+                    cfg_path.display()
+                );
+                return Ok(());
+            }
             if provider == "copilot" || provider == "github-copilot" {
                 let access_token = hermes_cli::copilot_auth::start_copilot_device_flow().await?;
                 manager
@@ -1774,6 +2396,24 @@ async fn run_auth(
                     .map_err(|e| AgentError::Config(e.to_string()))?;
                 println!(
                     "Weixin: token cleared and platform disabled in {} (account file retained)",
+                    cfg_path.display()
+                );
+                return Ok(());
+            }
+            if let Some(platform_key) = gateway_platform_provider_key(&provider) {
+                let cfg_path = hermes_state_root(&cli).join("config.yaml");
+                let mut disk = load_user_config_file(&cfg_path)
+                    .map_err(|e| AgentError::Config(e.to_string()))?;
+                if let Some(p) = disk.platforms.get_mut(platform_key) {
+                    p.enabled = false;
+                    p.token = None;
+                }
+                validate_config(&disk).map_err(|e| AgentError::Config(e.to_string()))?;
+                save_config_yaml(&cfg_path, &disk)
+                    .map_err(|e| AgentError::Config(e.to_string()))?;
+                println!(
+                    "{}: disabled and token cleared in {}",
+                    platform_key,
                     cfg_path.display()
                 );
                 return Ok(());
@@ -1845,6 +2485,24 @@ async fn run_auth(
                     },
                     has_cfg_token,
                     has_saved_token,
+                    enabled
+                );
+                return Ok(());
+            }
+            if let Some(platform_key) = gateway_platform_provider_key(&provider) {
+                let cfg_path = hermes_state_root(&cli).join("config.yaml");
+                let disk = load_user_config_file(&cfg_path)
+                    .map_err(|e| AgentError::Config(e.to_string()))?;
+                let (enabled, token_present) = disk
+                    .platforms
+                    .get(platform_key)
+                    .map(|p| (p.enabled, platform_token_or_extra(p).is_some()))
+                    .unwrap_or((false, false));
+                println!(
+                    "{} ({}): credential_present={} enabled={}",
+                    platform_key,
+                    cfg_path.display(),
+                    token_present,
                     enabled
                 );
                 return Ok(());
