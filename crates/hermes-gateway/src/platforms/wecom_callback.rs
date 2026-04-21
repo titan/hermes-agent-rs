@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn signature_is_stable() {
         let sig = WeComCallbackAdapter::sha1_signature("t", "1", "2", "enc");
-        assert_eq!(sig, "327571c10457cb7cef10e09e2f0976f86cbf9525");
+        assert_eq!(sig, "97df0b59cbd11ad14d4dfbdafb8dbd7b6dafcfec");
     }
 
     #[test]

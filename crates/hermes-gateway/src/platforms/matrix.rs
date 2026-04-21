@@ -155,8 +155,10 @@ pub fn markdown_to_html(md: &str) -> String {
         .replace_all(&html, "<strong>$1</strong>")
         .into_owned();
 
-    // Italic *text* (but not inside <strong> tags we just created)
-    let italic_re = Regex::new(r"(?<!\*)\*([^*]+)\*(?!\*)").expect("valid regex");
+    // Italic *text* — bold (**) was already replaced above, so any remaining
+    // single * pairs are italic. We match a * that is NOT preceded by another *
+    // by using a simple non-greedy pattern on the already-bold-replaced text.
+    let italic_re = Regex::new(r"\*([^*]+)\*").expect("valid regex");
     html = italic_re.replace_all(&html, "<em>$1</em>").into_owned();
 
     // Links [text](url)
