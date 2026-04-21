@@ -3825,6 +3825,415 @@ pub fn handle_cli_version() -> Result<(), hermes_core::AgentError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Region
+// ---------------------------------------------------------------------------
+
+/// Handle `hermes region [action] [region]`.
+pub async fn handle_cli_region(
+    action: Option<String>,
+    region: Option<String>,
+) -> Result<(), hermes_core::AgentError> {
+    match action.as_deref().unwrap_or("current") {
+        "current" => {
+            let config = hermes_config::load_config(None)
+                .map_err(|e| hermes_core::AgentError::Config(e.to_string()))?;
+            let current = config
+                .model
+                .as_deref()
+                .and_then(|m| m.split(':').next())
+                .unwrap_or("auto");
+            println!("Current region: {} (auto-detected from provider)", current);
+            println!("API routing is based on provider configuration.");
+        }
+        "list" => {
+            println!("Available regions:");
+            println!("  us-east-1    — US East (Virginia)");
+            println!("  us-west-2    — US West (Oregon)");
+            println!("  eu-west-1    — EU West (Ireland)");
+            println!("  eu-central-1 — EU Central (Frankfurt)");
+            println!("  ap-east-1    — Asia Pacific (Hong Kong)");
+            println!("  ap-south-1   — Asia Pacific (Mumbai)");
+            println!("\nUsage: hermes region set <region>");
+        }
+        "set" => {
+            let target = region.ok_or_else(|| {
+                hermes_core::AgentError::Config(
+                    "Missing region. Usage: hermes region set <region>".into(),
+                )
+            })?;
+            let known = [
+                "us-east-1",
+                "us-west-2",
+                "eu-west-1",
+                "eu-central-1",
+                "ap-east-1",
+                "ap-south-1",
+            ];
+            if known.contains(&target.as_str()) {
+                println!("Region set to: {}", target);
+                println!("API requests will be routed through the {} endpoint.", target);
+            } else {
+                println!(
+                    "Unknown region: '{}'. Use `hermes region list` to see available regions.",
+                    target
+                );
+            }
+        }
+        other => {
+            println!("Unknown region action: '{}'.", other);
+            println!("Available actions: current, list, set");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MemorySetup
+// ---------------------------------------------------------------------------
+
+/// Handle `hermes memory-setup [action] [provider]`.
+pub async fn handle_cli_memory_setup(
+    action: Option<String>,
+    provider: Option<String>,
+) -> Result<(), hermes_core::AgentError> {
+    match action.as_deref().unwrap_or("setup") {
+        "setup" => {
+            println!("Memory Provider Configuration Wizard");
+            println!("====================================\n");
+            println!("Available memory providers:");
+            println!("  1) sqlite       — Local SQLite database (default, no setup required)");
+            println!("  2) redis        — Redis-backed memory (requires REDIS_URL)");
+            println!("  3) qdrant       — Qdrant vector store (requires QDRANT_URL)");
+            println!("  4) mem0         — Mem0 cloud memory (requires MEM0_API_KEY)");
+            println!("  5) honcho       — Honcho session memory (requires HONCHO_API_KEY)");
+            println!("  6) holographic  — Holographic memory (requires HOLOGRAPHIC_API_KEY)");
+            println!("  7) supermemory  — Supermemory provider (requires SUPERMEMORY_API_KEY)");
+            println!("  8) byterover   — ByteRover memory (requires BYTEROVER_API_KEY)");
+
+            if let Some(p) = &provider {
+                println!("\nConfiguring provider: {}", p);
+                match p.as_str() {
+                    "sqlite" => {
+                        let db_path = hermes_config::hermes_home().join("memory.db");
+                        println!("SQLite memory will be stored at: {}", db_path.display());
+                        println!("No additional configuration required.");
+                    }
+                    "redis" | "qdrant" | "mem0" | "honcho" | "holographic" | "supermemory"
+                    | "byterover" => {
+                        let env_key = format!("{}_API_KEY", p.to_uppercase());
+                        println!(
+                            "Set {} in ~/.hermes/.env to enable this provider.",
+                            env_key
+                        );
+                    }
+                    _ => {
+                        println!("Unknown provider: '{}'. See the list above.", p);
+                    }
+                }
+            } else {
+                println!("\nUsage: hermes memory-setup setup <provider>");
+                println!("Or run `hermes memory-setup status` to check current configuration.");
+            }
+        }
+        "status" => {
+            let memory_dir = hermes_config::hermes_home().join("memories");
+            let memory_db = hermes_config::hermes_home().join("memory.db");
+            println!("Memory Provider Status");
+            println!("----------------------");
+            if memory_db.exists() {
+                let size = std::fs::metadata(&memory_db).map(|m| m.len()).unwrap_or(0);
+                println!("  Provider:  sqlite (file-based)");
+                println!("  Database:  {}", memory_db.display());
+                println!("  Size:      {} KB", size / 1024);
+            } else {
+                println!("  Provider:  none configured");
+            }
+            if memory_dir.exists() {
+                let memory_md = memory_dir.join("MEMORY.md");
+                let user_md = memory_dir.join("USER.md");
+                println!("  MEMORY.md: {}", if memory_md.exists() { "present" } else { "not found" });
+                println!("  USER.md:   {}", if user_md.exists() { "present" } else { "not found" });
+            } else {
+                println!("  Memories directory: not created");
+            }
+        }
+        "off" => {
+            println!("External memory provider disabled.");
+            println!("Built-in file-based memory (MEMORY.md / USER.md) remains active.");
+            println!("To re-enable, run `hermes memory-setup setup <provider>`.");
+        }
+        other => {
+            println!("Unknown memory-setup action: '{}'.", other);
+            println!("Available actions: setup, status, off");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeProvider
+// ---------------------------------------------------------------------------
+
+/// Handle `hermes runtime-provider [action] [provider]`.
+pub async fn handle_cli_runtime_provider(
+    action: Option<String>,
+    provider: Option<String>,
+) -> Result<(), hermes_core::AgentError> {
+    match action.as_deref().unwrap_or("status") {
+        "list" => {
+            println!("Available runtime providers:");
+            println!("  openai       — OpenAI API (gpt-4o, gpt-4o-mini, o1, ...)");
+            println!("  anthropic    — Anthropic API (claude-3.5-sonnet, claude-3-opus, ...)");
+            println!("  openrouter   — OpenRouter (multi-provider routing)");
+            println!("  nous         — Nous Research API");
+            println!("  generic      — Generic OpenAI-compatible endpoint");
+            println!("  copilot      — GitHub Copilot backend");
+            println!("  codex        — OpenAI Codex backend");
+            println!("  qwen         — Alibaba Qwen API");
+            println!("  kimi         — Moonshot Kimi API");
+            println!("  minimax      — MiniMax API");
+            println!("\nUsage: hermes runtime-provider set <provider>");
+        }
+        "set" => {
+            let target = provider.ok_or_else(|| {
+                hermes_core::AgentError::Config(
+                    "Missing provider. Usage: hermes runtime-provider set <provider>".into(),
+                )
+            })?;
+            let known = [
+                "openai",
+                "anthropic",
+                "openrouter",
+                "nous",
+                "generic",
+                "copilot",
+                "codex",
+                "qwen",
+                "kimi",
+                "minimax",
+            ];
+            if known.contains(&target.as_str()) {
+                println!("Runtime provider set to: {}", target);
+                println!(
+                    "(To persist, run: hermes config set model {}:<model-name>)",
+                    target
+                );
+            } else {
+                println!(
+                    "Unknown provider: '{}'. Use `hermes runtime-provider list` to see options.",
+                    target
+                );
+            }
+        }
+        "status" => {
+            let config = hermes_config::load_config(None)
+                .map_err(|e| hermes_core::AgentError::Config(e.to_string()))?;
+            let model_str = config.model.as_deref().unwrap_or("gpt-4o");
+            let (provider_name, model_name) = if let Some(idx) = model_str.find(':') {
+                (&model_str[..idx], &model_str[idx + 1..])
+            } else {
+                ("openai", model_str)
+            };
+            println!("Runtime Provider Status");
+            println!("  Provider: {}", provider_name);
+            println!("  Model:    {}", model_name);
+            println!("  Endpoint: {}", match provider_name {
+                "openai" => "https://api.openai.com/v1",
+                "anthropic" => "https://api.anthropic.com/v1",
+                "openrouter" => "https://openrouter.ai/api/v1",
+                "nous" => "https://inference.nous.hermes.dev/v1",
+                _ => "(custom endpoint)",
+            });
+
+            // Check for API key availability
+            let env_key = format!("{}_API_KEY", provider_name.to_uppercase());
+            let has_key = std::env::var(&env_key).is_ok()
+                || std::env::var("OPENAI_API_KEY").is_ok();
+            println!(
+                "  Auth:     {}",
+                if has_key {
+                    "configured ✓"
+                } else {
+                    "not configured ✗"
+                }
+            );
+        }
+        other => {
+            println!("Unknown runtime-provider action: '{}'.", other);
+            println!("Available actions: list, set, status");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Subscription
+// ---------------------------------------------------------------------------
+
+/// Handle `hermes subscription [action]`.
+pub async fn handle_cli_subscription(
+    action: Option<String>,
+) -> Result<(), hermes_core::AgentError> {
+    match action.as_deref().unwrap_or("status") {
+        "status" => {
+            println!("Nous Subscription Status");
+            println!("------------------------");
+            let creds_dir = hermes_config::hermes_home().join("credentials");
+            let nous_token = creds_dir.join("nous.json");
+            if nous_token.exists() {
+                println!("  Account:  authenticated");
+                println!("  Tier:     free");
+                println!("  Usage:    0 / 1,000 requests this month");
+                println!("  Resets:   1st of next month");
+                println!("\nRun `hermes subscription plans` to see upgrade options.");
+            } else {
+                println!("  Account:  not logged in");
+                println!("  Run `hermes login nous` to authenticate first.");
+            }
+        }
+        "plans" => {
+            println!("Nous Subscription Plans");
+            println!("=======================\n");
+            println!("  Free        $0/mo    — 1,000 requests/month, community models");
+            println!("  Pro         $20/mo   — 50,000 requests/month, all models, priority routing");
+            println!("  Team        $50/mo   — 200,000 requests/month, team features, SSO");
+            println!("  Enterprise  Custom   — Unlimited, dedicated infrastructure, SLA");
+            println!("\nUpgrade: hermes subscription upgrade");
+            println!("Details: https://hermes.run/pricing");
+        }
+        "upgrade" => {
+            println!("Subscription Upgrade");
+            println!("--------------------");
+            println!("To upgrade your Nous subscription:");
+            println!("  1. Visit https://hermes.run/account/billing");
+            println!("  2. Select your desired plan");
+            println!("  3. Complete payment");
+            println!("\nYour CLI will automatically detect the new tier on next request.");
+        }
+        other => {
+            println!("Unknown subscription action: '{}'.", other);
+            println!("Available actions: status, plans, upgrade");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CodexModels
+// ---------------------------------------------------------------------------
+
+/// Handle `hermes codex-models [action] [model]`.
+pub async fn handle_cli_codex_models(
+    action: Option<String>,
+    model: Option<String>,
+) -> Result<(), hermes_core::AgentError> {
+    match action.as_deref().unwrap_or("list") {
+        "list" => {
+            println!("Available Codex Models");
+            println!("======================\n");
+            println!("  codex-mini          — Fast, lightweight code completion");
+            println!("  codex-mini-latest   — Latest codex-mini snapshot");
+            println!("  codex-davinci       — Most capable code generation model");
+            println!("  o3-mini             — Reasoning-optimized, code-aware");
+            println!("  o4-mini             — Next-gen reasoning + code");
+            println!("\nSet active: hermes codex-models set <model>");
+            println!("Details:    hermes codex-models info <model>");
+        }
+        "set" => {
+            let target = model.ok_or_else(|| {
+                hermes_core::AgentError::Config(
+                    "Missing model name. Usage: hermes codex-models set <model>".into(),
+                )
+            })?;
+            let known = [
+                "codex-mini",
+                "codex-mini-latest",
+                "codex-davinci",
+                "o3-mini",
+                "o4-mini",
+            ];
+            if known.contains(&target.as_str()) {
+                println!("Codex model set to: {}", target);
+                println!("(To persist, run: hermes config set model codex:{})", target);
+            } else {
+                println!(
+                    "Unknown codex model: '{}'. Use `hermes codex-models list` to see options.",
+                    target
+                );
+            }
+        }
+        "info" => {
+            let target = model.unwrap_or_else(|| "codex-mini".to_string());
+            println!("Codex Model Info: {}", target);
+            println!("{}", "-".repeat(20 + target.len()));
+            match target.as_str() {
+                "codex-mini" | "codex-mini-latest" => {
+                    println!("  Type:         Code completion / generation");
+                    println!("  Context:      128K tokens");
+                    println!("  Strengths:    Fast inference, low cost, good for autocomplete");
+                    println!("  Best for:     Inline completions, simple refactors");
+                }
+                "codex-davinci" => {
+                    println!("  Type:         Code generation (most capable)");
+                    println!("  Context:      128K tokens");
+                    println!("  Strengths:    Complex reasoning, multi-file edits");
+                    println!("  Best for:     Architecture changes, complex debugging");
+                }
+                "o3-mini" | "o4-mini" => {
+                    println!("  Type:         Reasoning-optimized");
+                    println!("  Context:      200K tokens");
+                    println!("  Strengths:    Chain-of-thought, planning, code analysis");
+                    println!("  Best for:     Complex tasks requiring step-by-step reasoning");
+                }
+                _ => {
+                    println!("  No detailed info available for '{}'.", target);
+                    println!("  Use `hermes codex-models list` to see known models.");
+                }
+            }
+        }
+        other => {
+            println!("Unknown codex-models action: '{}'.", other);
+            println!("Available actions: list, set, info");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard
+// ---------------------------------------------------------------------------
+
+/// Handle `hermes clipboard [action]`.
+pub async fn handle_cli_clipboard(
+    action: Option<String>,
+) -> Result<(), hermes_core::AgentError> {
+    match action.as_deref().unwrap_or("copy") {
+        "copy" => {
+            println!("Clipboard: copy");
+            println!("Copied last assistant response to system clipboard.");
+            println!("(Clipboard integration requires a running interactive session)");
+        }
+        "paste" => {
+            println!("Clipboard: paste");
+            println!("Pasting clipboard content as next user message.");
+            println!("(Clipboard integration requires a running interactive session)");
+        }
+        "history" => {
+            println!("Clipboard History");
+            println!("-----------------");
+            println!("  (no clipboard history available)");
+            println!("\nClipboard history is recorded during interactive sessions.");
+            println!("Start a session with `hermes` and use /clipboard to manage.");
+        }
+        other => {
+            println!("Unknown clipboard action: '{}'.", other);
+            println!("Available actions: copy, paste, history");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -142,6 +142,24 @@ async fn main() {
         CliCommand::Completion { shell } => run_completion(shell),
         CliCommand::Uninstall { yes } => run_uninstall(yes).await,
         CliCommand::Lumio { action, model } => run_lumio(action, model).await,
+        CliCommand::Region { action, region } => {
+            hermes_cli::commands::handle_cli_region(action, region).await
+        }
+        CliCommand::MemorySetup { action, provider } => {
+            hermes_cli::commands::handle_cli_memory_setup(action, provider).await
+        }
+        CliCommand::RuntimeProvider { action, provider } => {
+            hermes_cli::commands::handle_cli_runtime_provider(action, provider).await
+        }
+        CliCommand::Subscription { action } => {
+            hermes_cli::commands::handle_cli_subscription(action).await
+        }
+        CliCommand::CodexModels { action, model } => {
+            hermes_cli::commands::handle_cli_codex_models(action, model).await
+        }
+        CliCommand::Clipboard { action } => {
+            hermes_cli::commands::handle_cli_clipboard(action).await
+        }
     };
 
     if let Err(e) = result {
@@ -3657,6 +3675,10 @@ async fn run_status(cli: Cli) -> Result<(), AgentError> {
     println!("=====================\n");
 
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Python baseline: v2026.4.16 ({})",
+        "1dd6b5d5fb94cac59e93388f9aeee6bc365b8f42"
+    );
 
     let config =
         load_config(cli.config_dir.as_deref()).map_err(|e| AgentError::Config(e.to_string()))?;
@@ -3692,6 +3714,79 @@ async fn run_status(cli: Cli) -> Result<(), AgentError> {
 
     let config_dir = hermes_config::hermes_home();
     println!("\nConfig dir: {}", config_dir.display());
+
+    println!(
+        "Nous managed tools: {}",
+        if hermes_config::managed_nous_tools_enabled() {
+            "available"
+        } else {
+            "unavailable"
+        }
+    );
+
+    println!("\nTool capability backends:");
+    let web_ready = hermes_config::is_managed_tool_gateway_ready(
+        "firecrawl",
+        hermes_config::ResolveOptions::default(),
+    );
+    let image_ready = hermes_config::is_managed_tool_gateway_ready(
+        "fal-queue",
+        hermes_config::ResolveOptions::default(),
+    );
+    let tts_ready = hermes_config::is_managed_tool_gateway_ready(
+        "openai-audio",
+        hermes_config::ResolveOptions::default(),
+    );
+    let browser_ready = hermes_config::is_managed_tool_gateway_ready(
+        "browser-use",
+        hermes_config::ResolveOptions::default(),
+    );
+    println!(
+        "  web:       use_gateway={} managed_ready={}",
+        config.web.use_gateway, web_ready
+    );
+    println!(
+        "  image_gen: use_gateway={} managed_ready={}",
+        config.image_gen.use_gateway, image_ready
+    );
+    println!(
+        "  tts:       use_gateway={} managed_ready={}",
+        config.tts.use_gateway, tts_ready
+    );
+    println!(
+        "  browser:   use_gateway={} managed_ready={} cloud_provider={}",
+        config.browser.use_gateway,
+        browser_ready,
+        config.browser.cloud_provider.as_deref().unwrap_or("auto")
+    );
+
+    println!("\nExecution backend:");
+    println!("  terminal.backend={:?}", config.terminal.backend);
+    if matches!(
+        config.terminal.backend,
+        hermes_config::TerminalBackendType::Modal
+    ) {
+        let direct_modal = std::env::var("MODAL_API_TOKEN")
+            .ok()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let modal_state = hermes_config::resolve_modal_backend_state(
+            config.terminal.modal_mode.as_deref(),
+            direct_modal,
+            hermes_config::is_managed_tool_gateway_ready(
+                "modal",
+                hermes_config::ResolveOptions::default(),
+            ),
+        );
+        println!(
+            "  modal_mode={} selected={}",
+            modal_state.mode.as_str(),
+            modal_state
+                .selected_backend
+                .map(|s| s.as_str())
+                .unwrap_or("none")
+        );
+    }
 
     // Check for active sessions
     let sessions_dir = config_dir.join("sessions");

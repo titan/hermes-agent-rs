@@ -11,6 +11,8 @@ pub mod budget;
 pub mod compression;
 pub mod context;
 pub mod context_files;
+pub mod context_references;
+pub mod copilot_acp;
 pub mod credential_pool;
 pub mod fallback;
 pub mod honcho_provider;

@@ -305,6 +305,89 @@ pub enum CliCommand {
         #[arg(short, long)]
         model: Option<String>,
     },
+
+    /// Region selection for API routing.
+    ///
+    /// Examples:
+    ///   hermes region                   — show current region
+    ///   hermes region list              — list available regions
+    ///   hermes region set us-east-1     — set the active region
+    ///   hermes region current           — show current region
+    Region {
+        /// Action: "list", "set", or "current" (default: current).
+        action: Option<String>,
+        /// Region identifier (e.g. "us-east-1", "eu-west-1").
+        region: Option<String>,
+    },
+
+    /// Memory provider configuration wizard.
+    ///
+    /// Examples:
+    ///   hermes memory-setup             — run the setup wizard
+    ///   hermes memory-setup status      — show current memory provider
+    ///   hermes memory-setup off         — disable external memory provider
+    ///   hermes memory-setup setup redis — configure redis as memory provider
+    #[command(name = "memory-setup")]
+    MemorySetup {
+        /// Action: "setup" (default), "status", or "off".
+        action: Option<String>,
+        /// Provider name (e.g. "redis", "qdrant", "mem0", "honcho").
+        provider: Option<String>,
+    },
+
+    /// Runtime provider management.
+    ///
+    /// Examples:
+    ///   hermes runtime-provider         — show current runtime provider
+    ///   hermes runtime-provider list    — list available providers
+    ///   hermes runtime-provider set openai — switch runtime provider
+    ///   hermes runtime-provider status  — show provider status and health
+    #[command(name = "runtime-provider")]
+    RuntimeProvider {
+        /// Action: "list", "set", or "status" (default: status).
+        action: Option<String>,
+        /// Provider name (e.g. "openai", "anthropic", "openrouter", "nous").
+        provider: Option<String>,
+    },
+
+    /// Nous subscription management.
+    ///
+    /// Examples:
+    ///   hermes subscription             — show current subscription status
+    ///   hermes subscription status      — show subscription details
+    ///   hermes subscription plans       — list available plans
+    ///   hermes subscription upgrade     — upgrade subscription tier
+    Subscription {
+        /// Action: "status" (default), "plans", or "upgrade".
+        action: Option<String>,
+    },
+
+    /// Codex model management.
+    ///
+    /// Examples:
+    ///   hermes codex-models             — list available codex models
+    ///   hermes codex-models list        — list all codex models
+    ///   hermes codex-models set codex-mini — set the active codex model
+    ///   hermes codex-models info codex-mini — show model details
+    #[command(name = "codex-models")]
+    CodexModels {
+        /// Action: "list" (default), "set", or "info".
+        action: Option<String>,
+        /// Model name (e.g. "codex-mini", "codex-davinci").
+        model: Option<String>,
+    },
+
+    /// Clipboard integration.
+    ///
+    /// Examples:
+    ///   hermes clipboard                — show clipboard status
+    ///   hermes clipboard copy           — copy last assistant response to clipboard
+    ///   hermes clipboard paste          — paste clipboard content as user message
+    ///   hermes clipboard history        — show clipboard history
+    Clipboard {
+        /// Action: "copy", "paste", or "history".
+        action: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
