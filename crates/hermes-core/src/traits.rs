@@ -100,6 +100,12 @@ pub trait PlatformAdapter: Send + Sync {
 
     /// Return the name of this platform (e.g. "telegram", "discord").
     fn platform_name(&self) -> &str;
+
+    /// Periodic maintenance: prune token caches, dedup maps, etc.
+    ///
+    /// Default is a no-op. Adapters with long-lived in-memory caches should
+    /// override this so gateway cleanup watchers can reclaim memory.
+    async fn maintenance_prune(&self) {}
 }
 
 // ---------------------------------------------------------------------------

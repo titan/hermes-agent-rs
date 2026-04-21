@@ -467,6 +467,18 @@ impl PlatformAdapter for WeComCallbackAdapter {
         Ok(())
     }
 
+    async fn maintenance_prune(&self) {
+        let now = Instant::now();
+        {
+            let mut m = self.access_tokens.write().await;
+            m.retain(|_, (_, exp)| now < *exp);
+        }
+        {
+            let mut s = self.seen.write().await;
+            s.retain(|_, at| now.duration_since(*at) < Duration::from_secs(DEDUP_TTL_SECS));
+        }
+    }
+
     fn is_running(&self) -> bool {
         self.base.is_running()
     }

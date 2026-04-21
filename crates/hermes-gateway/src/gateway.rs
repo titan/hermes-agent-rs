@@ -23,6 +23,7 @@ use hermes_core::types::{Message, MessageRole};
 use crate::background::{BackgroundTaskManager, TaskStatus};
 use crate::commands::{handle_command, GatewayCommandResult};
 use crate::dm::{DmDecision, DmManager};
+use crate::hook_payloads;
 use crate::hooks::{HookEvent, HookRegistry};
 use crate::session::SessionManager;
 use crate::stream::{StreamConfig, StreamManager};
@@ -385,6 +386,7 @@ impl Gateway {
 
     /// Stop all platform adapters gracefully.
     pub async fn stop_all(&self) -> Result<(), GatewayError> {
+        self.run_internal_maintenance_once().await;
         let adapters = self.adapters.read().await;
         for (name, adapter) in adapters.iter() {
             info!("Stopping platform adapter: {}", name);
@@ -452,13 +454,11 @@ impl Gateway {
         if session_started || session_auto_reset {
             self.emit_hook_event(
                 "session:start",
-                serde_json::json!({
-                    "platform": incoming.platform,
-                    "chat_id": incoming.chat_id,
-                    "user_id": incoming.user_id,
-                    "session_id": session_key,
-                    "reason": if session_started { "new" } else { "auto_reset" }
-                }),
+                hook_payloads::session_start_from_incoming(
+                    incoming,
+                    &session_key,
+                    if session_started { "new" } else { "auto_reset" },
+                ),
             )
             .await;
         }
@@ -507,13 +507,7 @@ impl Gateway {
             if let Some(command_name) = Self::extract_command_name(&incoming.text) {
                 self.emit_hook_event(
                     &format!("command:{}", command_name),
-                    serde_json::json!({
-                        "platform": incoming.platform,
-                        "chat_id": incoming.chat_id,
-                        "user_id": incoming.user_id,
-                        "session_id": session_key,
-                        "command": command_name
-                    }),
+                    hook_payloads::command_context(incoming, session_key, command_name.as_str()),
                 )
                 .await;
             }
@@ -541,23 +535,13 @@ impl Gateway {
             GatewayCommandResult::ResetSession(reply) => {
                 self.emit_hook_event(
                     "session:end",
-                    serde_json::json!({
-                        "platform": incoming.platform,
-                        "chat_id": incoming.chat_id,
-                        "user_id": incoming.user_id,
-                        "session_id": session_key
-                    }),
+                    hook_payloads::session_lifecycle_from_incoming(incoming, session_key),
                 )
                 .await;
                 self.session_manager.reset_session(session_key).await;
                 self.emit_hook_event(
                     "session:reset",
-                    serde_json::json!({
-                        "platform": incoming.platform,
-                        "chat_id": incoming.chat_id,
-                        "user_id": incoming.user_id,
-                        "session_id": session_key
-                    }),
+                    hook_payloads::session_lifecycle_from_incoming(incoming, session_key),
                 )
                 .await;
                 self.send_message(&incoming.platform, &incoming.chat_id, &reply, None)
@@ -1001,13 +985,7 @@ impl Gateway {
     ) -> Result<(), GatewayError> {
         self.emit_hook_event(
             "agent:start",
-            serde_json::json!({
-                "platform": incoming.platform,
-                "chat_id": incoming.chat_id,
-                "user_id": incoming.user_id,
-                "session_id": session_key,
-                "streaming": false
-            }),
+            hook_payloads::agent_start(incoming, session_key, false),
         )
         .await;
         let deferred_messages = Arc::new(StdMutex::new(Vec::new()));
@@ -1029,17 +1007,16 @@ impl Gateway {
         let response = match response_result {
             Ok(text) => text,
             Err(e) => {
+                self.flush_post_delivery_messages(
+                    &incoming.platform,
+                    &incoming.chat_id,
+                    deferred_messages.clone(),
+                    deferred_release.clone(),
+                )
+                .await;
                 self.emit_hook_event(
                     "agent:end",
-                    serde_json::json!({
-                        "platform": incoming.platform,
-                        "chat_id": incoming.chat_id,
-                        "user_id": incoming.user_id,
-                        "session_id": session_key,
-                        "streaming": false,
-                        "success": false,
-                        "error": e.to_string()
-                    }),
+                    hook_payloads::agent_end_error(incoming, session_key, false, &e.to_string()),
                 )
                 .await;
                 return Err(e);
@@ -1065,15 +1042,12 @@ impl Gateway {
         .await;
         self.emit_hook_event(
             "agent:end",
-            serde_json::json!({
-                "platform": incoming.platform,
-                "chat_id": incoming.chat_id,
-                "user_id": incoming.user_id,
-                "session_id": session_key,
-                "streaming": false,
-                "success": true,
-                "response_chars": response.chars().count()
-            }),
+            hook_payloads::agent_end_success(
+                incoming,
+                session_key,
+                false,
+                response.chars().count(),
+            ),
         )
         .await;
 
@@ -1089,13 +1063,7 @@ impl Gateway {
     ) -> Result<(), GatewayError> {
         self.emit_hook_event(
             "agent:start",
-            serde_json::json!({
-                "platform": incoming.platform,
-                "chat_id": incoming.chat_id,
-                "user_id": incoming.user_id,
-                "session_id": session_key,
-                "streaming": true
-            }),
+            hook_payloads::agent_start(incoming, session_key, true),
         )
         .await;
         let deferred_messages = Arc::new(StdMutex::new(Vec::new()));
@@ -1161,17 +1129,16 @@ impl Gateway {
         let response = match response_result {
             Ok(text) => text,
             Err(e) => {
+                self.flush_post_delivery_messages(
+                    &incoming.platform,
+                    &incoming.chat_id,
+                    deferred_messages.clone(),
+                    deferred_release.clone(),
+                )
+                .await;
                 self.emit_hook_event(
                     "agent:end",
-                    serde_json::json!({
-                        "platform": incoming.platform,
-                        "chat_id": incoming.chat_id,
-                        "user_id": incoming.user_id,
-                        "session_id": session_key,
-                        "streaming": true,
-                        "success": false,
-                        "error": e.to_string()
-                    }),
+                    hook_payloads::agent_end_error(incoming, session_key, true, &e.to_string()),
                 )
                 .await;
                 return Err(e);
@@ -1196,15 +1163,7 @@ impl Gateway {
         .await;
         self.emit_hook_event(
             "agent:end",
-            serde_json::json!({
-                "platform": incoming.platform,
-                "chat_id": incoming.chat_id,
-                "user_id": incoming.user_id,
-                "session_id": session_key,
-                "streaming": true,
-                "success": true,
-                "response_chars": response.chars().count()
-            }),
+            hook_payloads::agent_end_success(incoming, session_key, true, response.chars().count()),
         )
         .await;
 
@@ -1387,7 +1346,14 @@ impl Gateway {
             .filter(|(_, status, _)| *status == TaskStatus::Running)
             .count();
 
-        format!(
+        let hook_line = if let Some(reg) = self.hook_registry.read().await.as_ref() {
+            let (inv, ok, err) = reg.stats_snapshot();
+            format!("\n- hook handlers: invoked={} ok={} err={}", inv, ok, err)
+        } else {
+            String::new()
+        };
+
+        let body = format!(
             "🧭 Gateway status\n- model: {}\n- provider: {}\n- profile: {}\n- branch: {}\n- personality: {}\n- reasoning: {}\n- verbose: {}\n- yolo: {}\n- home: {}\n- messages in session: {}\n- running background tasks: {}\n- mcp generation: {}\n- input/output chars: {}/{}",
             state.model.unwrap_or_else(|| "default".to_string()),
             state.provider.unwrap_or_else(|| "default".to_string()),
@@ -1403,7 +1369,8 @@ impl Gateway {
             *self.mcp_reload_generation.read().await,
             usage.input_chars,
             usage.output_chars
-        )
+        );
+        format!("{}{}", body, hook_line)
     }
 
     async fn handle_background_command(
@@ -1663,6 +1630,37 @@ impl Gateway {
         }
     }
 
+    /// Prunes stale gateway maps and adapter-side caches (tokens, dedup tables).
+    pub async fn gateway_cleanup_watcher(&self, interval_secs: u64) {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(interval_secs.max(60)));
+        loop {
+            ticker.tick().await;
+            self.run_internal_maintenance_once().await;
+        }
+    }
+
+    async fn run_internal_maintenance_once(&self) {
+        let active: std::collections::HashSet<String> = self
+            .session_manager
+            .list_session_keys()
+            .await
+            .into_iter()
+            .collect();
+        {
+            let mut rs = self.runtime_state.write().await;
+            rs.retain(|k, _| active.contains(k));
+        }
+        {
+            let mut us = self.usage_stats.write().await;
+            us.retain(|k, _| active.contains(k));
+        }
+        let adapters = self.adapters.read().await.clone();
+        for adapter in adapters.values() {
+            adapter.maintenance_prune().await;
+        }
+    }
+
     /// Attach vision hint for image-bearing messages.
     pub fn enrich_message_with_vision(&self, text: &str) -> String {
         if text.contains("http://") || text.contains("https://") {
@@ -1782,6 +1780,7 @@ impl Gateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hook_payloads;
     use crate::hooks::{HookEvent, HookHandler, HookRegistry};
     use crate::session::SessionManager;
     use async_trait::async_trait;
@@ -2587,25 +2586,27 @@ mod tests {
             Box::pin(async move {
                 gw.emit_hook_event(
                     "agent:status",
-                    serde_json::json!({
-                        "platform": ctx.platform,
-                        "user_id": ctx.user_id,
-                        "session_id": ctx.session_key,
-                        "event_type": "lifecycle",
-                        "message": "Context pressure 85%"
-                    }),
+                    hook_payloads::agent_status(
+                        ctx.platform.clone(),
+                        ctx.chat_id.clone(),
+                        ctx.user_id.clone(),
+                        ctx.session_key.clone(),
+                        "lifecycle",
+                        "Context pressure 85%",
+                    ),
                 )
                 .await;
                 gw.emit_hook_event(
                     "agent:step",
-                    serde_json::json!({
-                        "platform": ctx.platform,
-                        "user_id": ctx.user_id,
-                        "session_id": ctx.session_key,
-                        "iteration": 1,
-                        "tool_names": ["memory"],
-                        "tools": [{"name":"memory","result":"ok"}]
-                    }),
+                    hook_payloads::agent_step(
+                        ctx.platform.clone(),
+                        ctx.chat_id.clone(),
+                        ctx.user_id.clone(),
+                        ctx.session_key.clone(),
+                        1,
+                        vec!["memory".into()],
+                        vec![serde_json::json!({"name":"memory","result":"ok"})],
+                    ),
                 )
                 .await;
                 Ok("done".to_string())

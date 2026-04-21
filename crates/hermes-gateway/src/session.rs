@@ -461,6 +461,11 @@ impl SessionManager {
         self.sessions.read().await.len()
     }
 
+    /// All active session keys (`platform:chat_id` or per-user variant).
+    pub async fn list_session_keys(&self) -> Vec<String> {
+        self.sessions.read().await.keys().cloned().collect()
+    }
+
     /// Check whether a session should be reset and perform reset if needed.
     /// Called periodically or before each interaction.
     pub async fn check_and_reset_if_needed(&self, session_id: &str) -> bool {

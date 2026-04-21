@@ -29,6 +29,7 @@ use hermes_cron::{
 use hermes_environments::LocalBackend;
 use hermes_gateway::gateway::GatewayConfig as RuntimeGatewayConfig;
 use hermes_gateway::gateway::IncomingMessage as GatewayIncomingMessage;
+use hermes_gateway::hook_payloads;
 use hermes_gateway::hooks::HookRegistry;
 use hermes_gateway::platforms::api_server::{ApiServerAdapter, ApiServerConfig};
 use hermes_gateway::platforms::bluebubbles::{BlueBubblesAdapter, BlueBubblesConfig};
@@ -486,13 +487,13 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
             let mut hook_registry = HookRegistry::new();
             hook_registry.register_builtins();
             hook_registry.discover_and_load(&hermes_home().join("hooks"));
+            hook_registry.set_execution_limits(Some(16));
             gateway.set_hook_registry(Arc::new(hook_registry)).await;
+            let enabled_refs: Vec<&str> = enabled.iter().map(|s| s.as_str()).collect();
             gateway
                 .emit_hook_event(
                     "gateway:startup",
-                    serde_json::json!({
-                        "enabled_platforms": enabled.iter().map(|s| s.as_str()).collect::<Vec<_>>()
-                    }),
+                    hook_payloads::gateway_startup(&enabled_refs),
                 )
                 .await;
 
@@ -565,6 +566,7 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                             });
                             let gw_hook = gateway_for_status_hook.clone();
                             let platform = platform_for_status_hook.clone();
+                            let chat_id_hook = chat_for_status.clone();
                             let user_id = user_for_status_hook.clone();
                             let session_id = session_for_status_hook.clone();
                             let event_type = event_type.to_string();
@@ -573,13 +575,14 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                                 gw_hook
                                     .emit_hook_event(
                                         "agent:status",
-                                        serde_json::json!({
-                                            "platform": platform,
-                                            "user_id": user_id,
-                                            "session_id": session_id,
-                                            "event_type": event_type,
-                                            "message": message
-                                        }),
+                                        hook_payloads::agent_status(
+                                            platform,
+                                            chat_id_hook,
+                                            user_id,
+                                            session_id,
+                                            &event_type,
+                                            &message,
+                                        ),
                                     )
                                     .await;
                             });
@@ -598,6 +601,7 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                         let tool_events_for_step = tool_events.clone();
                         let gateway_for_step_hook = gateway_for_review.clone();
                         let platform_for_step_hook = ctx.platform.clone();
+                        let chat_for_step_hook = ctx.chat_id.clone();
                         let user_for_step_hook = ctx.user_id.clone();
                         let session_for_step_hook = ctx.session_key.clone();
                         let on_step_complete: Box<dyn Fn(u32) + Send + Sync> =
@@ -617,20 +621,17 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                                     .collect();
                                 let gw_hook = gateway_for_step_hook.clone();
                                 let platform = platform_for_step_hook.clone();
+                                let chat_id = chat_for_step_hook.clone();
                                 let user_id = user_for_step_hook.clone();
                                 let session_id = session_for_step_hook.clone();
                                 tokio::spawn(async move {
                                     gw_hook
                                         .emit_hook_event(
                                             "agent:step",
-                                            serde_json::json!({
-                                                "platform": platform,
-                                                "user_id": user_id,
-                                                "session_id": session_id,
-                                                "iteration": iteration,
-                                                "tool_names": tool_names,
-                                                "tools": tools
-                                            }),
+                                            hook_payloads::agent_step(
+                                                platform, chat_id, user_id, session_id, iteration,
+                                                tool_names, tools,
+                                            ),
                                         )
                                         .await;
                                 });
@@ -727,6 +728,7 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                             });
                             let gw_hook = gateway_for_status_hook.clone();
                             let platform = platform_for_status_hook.clone();
+                            let chat_id_hook = chat_for_status.clone();
                             let user_id = user_for_status_hook.clone();
                             let session_id = session_for_status_hook.clone();
                             let event_type = event_type.to_string();
@@ -735,13 +737,14 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                                 gw_hook
                                     .emit_hook_event(
                                         "agent:status",
-                                        serde_json::json!({
-                                            "platform": platform,
-                                            "user_id": user_id,
-                                            "session_id": session_id,
-                                            "event_type": event_type,
-                                            "message": message
-                                        }),
+                                        hook_payloads::agent_status(
+                                            platform,
+                                            chat_id_hook,
+                                            user_id,
+                                            session_id,
+                                            &event_type,
+                                            &message,
+                                        ),
                                     )
                                     .await;
                             });
@@ -760,6 +763,7 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                         let tool_events_for_step = tool_events.clone();
                         let gateway_for_step_hook = gateway_for_review.clone();
                         let platform_for_step_hook = ctx.platform.clone();
+                        let chat_for_step_hook = ctx.chat_id.clone();
                         let user_for_step_hook = ctx.user_id.clone();
                         let session_for_step_hook = ctx.session_key.clone();
                         let on_step_complete: Box<dyn Fn(u32) + Send + Sync> =
@@ -779,20 +783,17 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                                     .collect();
                                 let gw_hook = gateway_for_step_hook.clone();
                                 let platform = platform_for_step_hook.clone();
+                                let chat_id = chat_for_step_hook.clone();
                                 let user_id = user_for_step_hook.clone();
                                 let session_id = session_for_step_hook.clone();
                                 tokio::spawn(async move {
                                     gw_hook
                                         .emit_hook_event(
                                             "agent:step",
-                                            serde_json::json!({
-                                                "platform": platform,
-                                                "user_id": user_id,
-                                                "session_id": session_id,
-                                                "iteration": iteration,
-                                                "tool_names": tool_names,
-                                                "tools": tools
-                                            }),
+                                            hook_payloads::agent_step(
+                                                platform, chat_id, user_id, session_id, iteration,
+                                                tool_names, tools,
+                                            ),
                                         )
                                         .await;
                                 });
@@ -933,6 +934,10 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                 let gw_expiry = gateway.clone();
                 sidecar_tasks.push(tokio::spawn(async move {
                     gw_expiry.session_expiry_watcher(300).await;
+                }));
+                let gw_cleanup = gateway.clone();
+                sidecar_tasks.push(tokio::spawn(async move {
+                    gw_cleanup.gateway_cleanup_watcher(300).await;
                 }));
             }
             let own_pid = std::process::id();

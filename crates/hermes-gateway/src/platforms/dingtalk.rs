@@ -567,6 +567,13 @@ impl PlatformAdapter for DingTalkAdapter {
     fn platform_name(&self) -> &str {
         "dingtalk"
     }
+
+    async fn maintenance_prune(&self) {
+        let now = Instant::now();
+        let mut map = self.inner.seen.write().await;
+        let cutoff = now - DEDUP_WINDOW;
+        map.retain(|_, t| *t > cutoff);
+    }
 }
 
 #[cfg(test)]

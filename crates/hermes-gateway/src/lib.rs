@@ -19,6 +19,7 @@ pub mod delivery;
 pub mod dm;
 pub mod format;
 pub mod gateway;
+pub mod hook_payloads;
 pub mod hooks;
 pub mod markdown_split;
 pub mod media;

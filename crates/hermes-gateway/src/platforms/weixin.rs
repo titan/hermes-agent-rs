@@ -1301,6 +1301,12 @@ impl PlatformAdapter for WeChatAdapter {
     fn platform_name(&self) -> &str {
         "weixin"
     }
+
+    async fn maintenance_prune(&self) {
+        let now = Instant::now();
+        let mut m = self.inner.seen.lock().await;
+        m.retain(|_, t| now.duration_since(*t) < DEDUP_TTL);
+    }
 }
 
 #[cfg(test)]
