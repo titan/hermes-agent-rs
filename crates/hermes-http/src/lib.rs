@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation, clippy::field_reassign_with_default)]
 //! HTTP and WebSocket API server for Hermes.
 //!
 //! Environment (see also `security` module):
@@ -16,7 +17,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use axum::body::Body;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::header;

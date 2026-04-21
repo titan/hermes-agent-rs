@@ -383,7 +383,7 @@ mod tests {
         ) -> Result<String, AgentError> {
             Ok(format!("contents of {}", path))
         }
-        async fn write_file(&self, path: &str, _content: &str) -> Result<(), AgentError> {
+        async fn write_file(&self, _path: &str, _content: &str) -> Result<(), AgentError> {
             Ok(())
         }
         async fn file_exists(&self, _path: &str) -> Result<bool, AgentError> {

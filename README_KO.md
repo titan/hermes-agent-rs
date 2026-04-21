@@ -6,7 +6,7 @@
 
 [Nous Research](https://nousresearch.com)의 [Hermes Agent](https://github.com/NousResearch/hermes-agent)를 Rust로 재작성한 프로덕션 버전.
 
-`110,000줄 이상의 Rust` · `1,354개 테스트` · `17개 크레이트` · `~16MB 바이너리`
+`110,000줄 이상의 Rust` · `1,428개 테스트` · `17개 크레이트` · `~16MB 바이너리`
 
 **[English](./README.md)** · **[中文](./README_ZH.md)** · **[日本語](./README_JA.md)** · **[한국어](./README_KO.md)**
 
@@ -125,7 +125,7 @@ docker run --rm -it -v ~/.hermes:/root/.hermes ghcr.io/lumio-research/hermes-age
 기여를 환영합니다. 제출 전에 테스트를 실행해 주세요:
 
 ```bash
-cargo test --workspace        # 1,354개 테스트
+cargo test --workspace        # 1,428개 테스트
 cargo clippy --workspace      # 린트
 cargo fmt --all --check       # 포맷
 ```

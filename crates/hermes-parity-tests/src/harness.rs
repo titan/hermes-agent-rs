@@ -11,7 +11,7 @@ use hermes_intelligence::anthropic_adapter::{
 };
 use hermes_intelligence::{
     estimate_tokens_rough, get_model_context_length, infer_provider_from_url, supports_tools,
-    supports_vision,
+    supports_vision, ErrorCategory, ErrorClassifier, RetryStrategy,
 };
 use hermes_intelligence::usage_pricing::resolve_billing_route;
 use hermes_tools::approval::{check_approval, ApprovalDecision};
@@ -307,6 +307,59 @@ pub fn dispatch_case(op: &str, input: &Value) -> Result<Value, String> {
             Ok(json!(label))
         }
 
+        // -- error_classifier ops --
+        "classify_error" => {
+            let error_type = input
+                .get("error_type")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing input.error_type".to_string())?;
+            let message = input
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let retry_after = input
+                .get("retry_after_secs")
+                .and_then(|v| v.as_u64());
+
+            let error = match error_type {
+                "RateLimited" => hermes_core::AgentError::RateLimited { retry_after_secs: retry_after },
+                "AuthFailed" => hermes_core::AgentError::AuthFailed(message.to_string()),
+                "ContextTooLong" => hermes_core::AgentError::ContextTooLong,
+                "Timeout" => hermes_core::AgentError::Timeout(message.to_string()),
+                "LlmApi" => hermes_core::AgentError::LlmApi(message.to_string()),
+                "Gateway" => hermes_core::AgentError::Gateway(message.to_string()),
+                "Io" => hermes_core::AgentError::Io(message.to_string()),
+                other => return Err(format!("unknown error_type: {}", other)),
+            };
+
+            let classifier = ErrorClassifier::new();
+            let category = classifier.classify(&error);
+            let strategy = classifier.recommend_strategy(&category);
+
+            let cat_label = match &category {
+                ErrorCategory::RateLimit { .. } => "RateLimit",
+                ErrorCategory::AuthFailed => "AuthFailed",
+                ErrorCategory::ContextTooLong => "ContextTooLong",
+                ErrorCategory::ServerError { .. } => "ServerError",
+                ErrorCategory::NetworkError => "NetworkError",
+                ErrorCategory::InvalidRequest => "InvalidRequest",
+                ErrorCategory::ModelOverloaded => "ModelOverloaded",
+                ErrorCategory::Timeout => "Timeout",
+                ErrorCategory::Unknown => "Unknown",
+            };
+            let strat_label = match &strategy {
+                RetryStrategy::RetryWithBackoff { .. } => "RetryWithBackoff",
+                RetryStrategy::RetryOnce => "RetryOnce",
+                RetryStrategy::NoRetry => "NoRetry",
+                RetryStrategy::UseFallbackModel => "UseFallbackModel",
+            };
+
+            Ok(json!({
+                "category": cat_label,
+                "strategy": strat_label,
+            }))
+        }
+
         // -- v4a_patch ops --
         "parse_v4a_patch" => {
             let patch = input
@@ -377,6 +430,11 @@ mod tests {
     #[test]
     fn parity_v4a_patch_fixtures() {
         run_fixtures_in_dir(&fixtures_dir().join("v4a_patch")).expect("v4a_patch fixtures");
+    }
+
+    #[test]
+    fn parity_error_classifier_fixtures() {
+        run_fixtures_in_dir(&fixtures_dir().join("error_classifier")).expect("error_classifier fixtures");
     }
 
     #[test]

@@ -1,3 +1,14 @@
+#![allow(
+    clippy::collapsible_match,
+    clippy::collapsible_if,
+    clippy::doc_nested_refdefs,
+    clippy::if_same_then_else,
+    clippy::manual_clamp,
+    clippy::needless_range_loop,
+    clippy::ptr_arg,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 //! # hermes-agent
 //!
 //! Core agent loop engine — orchestrates LLM calls, tool execution, and

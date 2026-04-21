@@ -1,26 +1,40 @@
-# ----- Build stage -----
-FROM rust:1.79-bookworm AS builder
-
+# ----- Chef stage (dependency caching) -----
+FROM rust:1-bookworm AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
-# Copy workspace manifests first for better layer caching
+# ----- Plan stage -----
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Build with all optional platform features
-RUN cargo build --release --features "telegram,discord,slack" \
-    || cargo build --release
+# ----- Build stage -----
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+# Build dependencies only (cached unless Cargo.toml/lock change)
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Copy source and build the actual binary
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+RUN cargo build --release -p hermes-cli
 
 # ----- Runtime stage -----
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/bash hermes
 
 COPY --from=builder /app/target/release/hermes /usr/local/bin/hermes
 
+USER hermes
 ENV HERMES_HOME=/data
 VOLUME ["/data"]
+
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
+    CMD hermes doctor || exit 1
 
 ENTRYPOINT ["hermes"]

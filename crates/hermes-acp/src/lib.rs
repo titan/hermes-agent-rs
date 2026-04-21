@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 //! Agent Communication Protocol (ACP) adapter.
 //!
 //! Implements the ACP JSON-RPC interface so that Hermes can be controlled

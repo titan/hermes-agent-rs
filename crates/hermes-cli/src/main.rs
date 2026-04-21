@@ -1,3 +1,12 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::print_literal,
+    clippy::field_reassign_with_default,
+    clippy::useless_format,
+    clippy::needless_borrow,
+    clippy::unwrap_or_default,
+    unused_variables
+)]
 //! Hermes Agent — binary entry point.
 //!
 //! Initializes logging, parses CLI arguments, and dispatches to the

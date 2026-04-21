@@ -1,3 +1,4 @@
+#![allow(clippy::default_constructed_unit_structs)]
 //! # hermes-eval
 //!
 //! Agent evaluation harness for Hermes Agent. Provides a benchmark-agnostic

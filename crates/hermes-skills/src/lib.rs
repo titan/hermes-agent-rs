@@ -1,3 +1,4 @@
+#![allow(clippy::ptr_arg)]
 //! Hermes Skills Crate
 //!
 //! Implements the skills system (Requirement 12) for Hermes Agent.

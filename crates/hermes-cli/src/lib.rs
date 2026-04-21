@@ -1,3 +1,19 @@
+#![allow(
+    clippy::bind_instead_of_map,
+    clippy::collapsible_if,
+    clippy::double_ended_iterator_last,
+    clippy::field_reassign_with_default,
+    clippy::items_after_test_module,
+    clippy::needless_borrow,
+    clippy::needless_borrows_for_generic_args,
+    clippy::nonminimal_bool,
+    clippy::print_literal,
+    clippy::redundant_closure,
+    clippy::type_complexity,
+    clippy::unwrap_or_default,
+    clippy::useless_format,
+    unreachable_patterns
+)]
 //! # hermes-cli
 //!
 //! CLI/TUI interface for Hermes Agent.

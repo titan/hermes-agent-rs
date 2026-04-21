@@ -893,7 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_hook_runs_true_successfully() {
-        let h = CommandHookHandler::new(
+        let _h = CommandHookHandler::new(
             "true-hook",
             vec!["/usr/bin/true".into()],
             std::env::temp_dir(),

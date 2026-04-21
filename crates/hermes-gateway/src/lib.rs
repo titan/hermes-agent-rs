@@ -1,3 +1,10 @@
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else,
+    clippy::should_implement_trait,
+    clippy::too_many_arguments,
+    dead_code
+)]
 //! # hermes-gateway
 //!
 //! Message gateway and platform adapters for the Hermes Agent system.

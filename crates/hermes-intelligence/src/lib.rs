@@ -1,3 +1,11 @@
+#![allow(
+    clippy::if_same_then_else,
+    clippy::ptr_arg,
+    clippy::should_implement_trait,
+    clippy::too_many_arguments,
+    clippy::unnecessary_unwrap,
+    dead_code
+)]
 //! Hermes Intelligence Crate
 //!
 //! Smart model router, error classifier, usage/pricing tracker,

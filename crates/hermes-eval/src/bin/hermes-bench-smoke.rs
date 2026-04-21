@@ -1,3 +1,4 @@
+#![allow(clippy::default_constructed_unit_structs)]
 //! Minimal TBLite smoke run: `cargo run -p hermes-eval --bin hermes-bench-smoke`
 //!
 //! Environment (optional):

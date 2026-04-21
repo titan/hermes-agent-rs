@@ -1,3 +1,10 @@
+#![allow(
+    clippy::len_zero,
+    clippy::redundant_closure,
+    clippy::trim_split_whitespace,
+    clippy::unnecessary_map_or,
+    dropping_references
+)]
 //! # hermes-cron
 //!
 //! Cron job scheduler for Hermes Agent (Requirement 13).

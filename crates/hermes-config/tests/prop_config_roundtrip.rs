@@ -10,9 +10,9 @@ use std::collections::HashMap;
 
 use hermes_config::{
     AgentLoopBehaviorConfig, ApprovalConfig, DailyReset, GatewayConfig, IdleReset,
-    LlmProviderConfig, PlatformConfig, ProfileConfig, ProxyConfig, SessionConfig,
-    SessionResetPolicy, SessionType, SkillsSettings, SmartModelRoutingConfig, StreamingConfig,
-    TerminalBackendType, TerminalConfig, ToolCapabilityConfig, ToolsSettings,
+    PlatformConfig, ProfileConfig, SessionConfig,
+    SessionResetPolicy, SkillsSettings, SmartModelRoutingConfig, StreamingConfig,
+    TerminalConfig, ToolCapabilityConfig, ToolsSettings,
     UnauthorizedDmBehavior,
 };
 use hermes_core::BudgetConfig;

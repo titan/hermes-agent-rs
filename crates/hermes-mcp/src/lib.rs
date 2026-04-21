@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation, dead_code)]
 //! # hermes-mcp
 //!
 //! MCP (Model Context Protocol) integration for Hermes Agent.

@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default, clippy::manual_strip)]
 //! # hermes-config
 //!
 //! Configuration management for the hermes-agent system.

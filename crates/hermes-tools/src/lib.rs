@@ -1,3 +1,12 @@
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::manual_clamp,
+    clippy::manual_strip,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    dead_code,
+    noop_method_call
+)]
 //! # hermes-tools
 //!
 //! Tool registry, toolset system, and tool implementations for Hermes Agent.

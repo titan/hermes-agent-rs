@@ -10,7 +10,7 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 ```bash
 cargo build --release                    # Binary at target/release/hermes
-cargo test --workspace                   # 641 tests, all crates
+cargo test --workspace                   # 1,428 tests, all crates
 cargo test -p hermes-parity-tests        # Parity fixture tests only
 cargo clippy --workspace --all-targets   # Lint (target: -D warnings)
 cargo fmt --all --check                  # Format check

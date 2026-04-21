@@ -6,7 +6,7 @@
 
 Rust rewrite of [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com).
 
-`110,000+ lines of Rust` · `1,354 tests` · `17 crates` · `~16MB binary`
+`110,000+ lines of Rust` · `1,428 tests` · `17 crates` · `~16MB binary`
 
 **[English](./README.md)** · **[中文](./README_ZH.md)** · **[日本語](./README_JA.md)** · **[한국어](./README_KO.md)**
 
@@ -125,7 +125,7 @@ docker run --rm -it -v ~/.hermes:/root/.hermes ghcr.io/lumio-research/hermes-age
 Contributions welcome. Run the test suite before submitting:
 
 ```bash
-cargo test --workspace        # 1,354 tests
+cargo test --workspace        # 1,428 tests
 cargo clippy --workspace      # Lint
 cargo fmt --all --check       # Format
 ```

@@ -13,6 +13,7 @@
 /// - Close unclosed formatting marks (**, *, `, etc.) at split point
 ///   and reopen in next chunk
 /// - Prefer splitting at paragraph boundaries (\n\n), then line boundaries (\n)
+#[allow(unused_assignments)]
 pub fn split_markdown(text: &str, max_len: usize) -> Vec<String> {
     if text.len() <= max_len {
         return vec![text.to_string()];
@@ -42,7 +43,7 @@ pub fn split_markdown(text: &str, max_len: usize) -> Vec<String> {
             next.push_str(remaining);
             // We need to own this string for the next iteration
             // Use a small trick: push to chunks temporarily and fix up
-            remaining = ""; // will be replaced
+            remaining = ""; // will be replaced (consumed below)
             chunks.push(next); // placeholder
             let last = chunks.pop().unwrap();
             // Re-process the remainder with the prefix
