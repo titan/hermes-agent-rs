@@ -483,11 +483,11 @@ fn render_memory_block(target: &str, entries: &[String]) -> Option<String> {
     };
     let content = entries.join(MEMORY_ENTRY_DELIMITER);
     let current = content.chars().count();
-    let pct = if limit > 0 {
-        ((current * 100) / limit).min(100)
-    } else {
-        0
-    };
+    let pct = current
+        .checked_mul(100)
+        .and_then(|v| v.checked_div(limit))
+        .unwrap_or(0)
+        .min(100);
     Some(format!(
         "{label} [{pct}% - {current}/{limit} chars]\n{content}"
     ))
