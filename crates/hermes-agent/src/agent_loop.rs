@@ -796,14 +796,77 @@ impl AgentLoop {
         session_started_hooks_fired: bool,
         persist_user_idx: Option<usize>,
     ) -> AgentResult {
-        self.memory_on_session_end(ctx.get_messages());
+        self.finalize_agent_result(
+            ctx,
+            total_turns,
+            tool_errors,
+            accumulated_usage,
+            session_cost_usd,
+            session_started_hooks_fired,
+            persist_user_idx,
+            false,
+            true,
+        )
+    }
+
+    fn should_emit_session_reset_hook(messages: &[Message]) -> bool {
+        messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .and_then(|m| m.content.as_deref())
+            .map(|content| {
+                let trimmed = content.trim();
+                matches!(trimmed, "/reset" | "/new")
+            })
+            .unwrap_or(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_agent_result(
+        &self,
+        ctx: &ContextManager,
+        total_turns: u32,
+        tool_errors: &[hermes_core::ToolErrorRecord],
+        accumulated_usage: Option<UsageStats>,
+        session_cost_usd: f64,
+        session_started_hooks_fired: bool,
+        persist_user_idx: Option<usize>,
+        finished_naturally: bool,
+        interrupted: bool,
+    ) -> AgentResult {
+        let messages = ctx.get_messages();
+        let end_ctx = serde_json::json!({
+            "session_id": self.config.session_id,
+            "turns": total_turns,
+            "finished_naturally": finished_naturally,
+            "interrupted": interrupted,
+            "session_started_hooks_fired": session_started_hooks_fired,
+        });
+        let _ = self.invoke_hook(HookType::OnSessionEnd, &end_ctx);
+        if Self::should_emit_session_reset_hook(messages) {
+            let reset_ctx = serde_json::json!({
+                "session_id": self.config.session_id,
+                "turns": total_turns,
+                "source": "user_command",
+            });
+            let _ = self.invoke_hook(HookType::OnSessionReset, &reset_ctx);
+        }
+        self.memory_on_session_end(messages);
+        let finalize_ctx = serde_json::json!({
+            "session_id": self.config.session_id,
+            "turns": total_turns,
+            "tool_errors": tool_errors.len(),
+            "session_cost_usd": session_cost_usd,
+        });
+        let _ = self.invoke_hook(HookType::OnSessionFinalize, &finalize_ctx);
         AgentResult {
             messages: self.messages_for_persisted_result(ctx, persist_user_idx),
-            finished_naturally: false,
+            finished_naturally,
             total_turns,
             tool_errors: tool_errors.to_vec(),
             usage: accumulated_usage,
-            interrupted: true,
+            interrupted,
             session_cost_usd: Some(session_cost_usd),
             session_started_hooks_fired,
         }
@@ -2059,6 +2122,13 @@ impl AgentLoop {
 
         for attempt in 0..=effective_max_retries {
             self.interrupt.check_interrupt()?;
+            let pre_api_ctx = serde_json::json!({
+                "attempt": attempt,
+                "model": model,
+                "stream": false,
+                "route_label": route.and_then(|r| r.route_label.as_deref()),
+            });
+            let _ = self.invoke_hook(HookType::PreApiRequest, &pre_api_ctx);
             let result = if let Some(rt) = route {
                 let (provider_name, model_name) = self.extract_provider_and_model(model);
                 let mode = rt.api_mode.as_ref().unwrap_or(&self.config.api_mode);
@@ -2116,6 +2186,28 @@ impl AgentLoop {
                     )
                     .await
             };
+            let post_api_ctx = match &result {
+                Ok(response) => serde_json::json!({
+                    "attempt": attempt,
+                    "model": model,
+                    "stream": false,
+                    "ok": true,
+                    "finish_reason": response.finish_reason,
+                    "has_tool_calls": response
+                        .message
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty()),
+                }),
+                Err(err) => serde_json::json!({
+                    "attempt": attempt,
+                    "model": model,
+                    "stream": false,
+                    "ok": false,
+                    "error": err.to_string(),
+                }),
+            };
+            let _ = self.invoke_hook(HookType::PostApiRequest, &post_api_ctx);
 
             match result {
                 Ok(response) => return Ok(response),
@@ -2500,17 +2592,17 @@ impl AgentLoop {
                 if let Some(msg) = summary_msg {
                     ctx.add_message(msg);
                 }
-                self.memory_on_session_end(ctx.get_messages());
-                return Ok(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: false,
+                return Ok(self.finalize_agent_result(
+                    &ctx,
                     total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
                     session_started_hooks_fired,
-                });
+                    persist_user_idx,
+                    false,
+                    false,
+                ));
             }
 
             total_turns += 1;
@@ -2691,17 +2783,17 @@ impl AgentLoop {
                         "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
                         session_cost_usd, limit
                     )));
-                    self.memory_on_session_end(ctx.get_messages());
-                    return Ok(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.finalize_agent_result(
+                        &ctx,
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                    });
+                        persist_user_idx,
+                        false,
+                        false,
+                    ));
                 }
             }
 
@@ -2762,17 +2854,17 @@ impl AgentLoop {
                     let (u, a) = extract_last_user_assistant(ctx.get_messages());
                     self.memory_sync(&u, &a, session_id);
                     self.spawn_background_review(total_turns, &ctx, review_memory_at_end);
-                    self.memory_on_session_end(ctx.get_messages());
-                    return Ok(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: true,
+                    return Ok(self.finalize_agent_result(
+                        &ctx,
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                    });
+                        persist_user_idx,
+                        true,
+                        false,
+                    ));
                 }
             };
 
@@ -2811,17 +2903,17 @@ impl AgentLoop {
                         "Max invalid tool retries reached ({}). Last invalid tool: {}",
                         self.config.invalid_tool_call_max_retries, invalid_tool_calls[0]
                     )));
-                    self.memory_on_session_end(ctx.get_messages());
-                    return Ok(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.finalize_agent_result(
+                        &ctx,
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                    });
+                        persist_user_idx,
+                        false,
+                        false,
+                    ));
                 }
                 for tc in &tool_calls {
                     let content = if self.tool_registry.get(&tc.function.name).is_none() {
@@ -3212,17 +3304,17 @@ impl AgentLoop {
                 if let Some(msg) = summary_msg {
                     ctx.add_message(msg);
                 }
-                self.memory_on_session_end(ctx.get_messages());
-                return Ok(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: false,
+                return Ok(self.finalize_agent_result(
+                    &ctx,
                     total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
                     session_started_hooks_fired,
-                });
+                    persist_user_idx,
+                    false,
+                    false,
+                ));
             }
 
             total_turns += 1;
@@ -3286,7 +3378,16 @@ impl AgentLoop {
                     ));
                 }
                 let r = if inner_attempt == 0 {
-                    match self
+                    let pre_api_ctx = serde_json::json!({
+                        "attempt": inner_attempt,
+                        "model": active_model,
+                        "stream": true,
+                        "route_label": turn_runtime_route
+                            .as_ref()
+                            .and_then(|r| r.route_label.as_deref()),
+                    });
+                    let _ = self.invoke_hook(HookType::PreApiRequest, &pre_api_ctx);
+                    let stream_collect = self
                         .collect_stream_llm_response(
                             &ctx,
                             &tool_schemas,
@@ -3294,8 +3395,32 @@ impl AgentLoop {
                             active_model,
                             &*on_chunk,
                         )
-                        .await?
-                    {
+                        .await;
+                    let post_api_ctx = match &stream_collect {
+                        Ok(StreamCollectOutcome::Complete(resp)) => serde_json::json!({
+                            "attempt": inner_attempt,
+                            "model": active_model,
+                            "stream": true,
+                            "ok": true,
+                            "finish_reason": resp.finish_reason,
+                        }),
+                        Ok(StreamCollectOutcome::Interrupted(_)) => serde_json::json!({
+                            "attempt": inner_attempt,
+                            "model": active_model,
+                            "stream": true,
+                            "ok": false,
+                            "interrupted": true,
+                        }),
+                        Err(err) => serde_json::json!({
+                            "attempt": inner_attempt,
+                            "model": active_model,
+                            "stream": true,
+                            "ok": false,
+                            "error": err.to_string(),
+                        }),
+                    };
+                    let _ = self.invoke_hook(HookType::PostApiRequest, &post_api_ctx);
+                    match stream_collect? {
                         StreamCollectOutcome::Complete(resp) => resp,
                         StreamCollectOutcome::Interrupted(partial) => {
                             if let Some(ref u) = partial.usage {
@@ -3434,17 +3559,17 @@ impl AgentLoop {
                         "Cost guard tripped: session spend ${:.4} exceeded max_cost_usd ${:.4}. Stopping loop.",
                         session_cost_usd, limit
                     )));
-                    self.memory_on_session_end(ctx.get_messages());
-                    return Ok(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.finalize_agent_result(
+                        &ctx,
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                    });
+                        persist_user_idx,
+                        false,
+                        false,
+                    ));
                 }
             }
 
@@ -3524,7 +3649,6 @@ impl AgentLoop {
                 let (u, a) = extract_last_user_assistant(ctx.get_messages());
                 self.memory_sync(&u, &a, session_id);
                 self.spawn_background_review(total_turns, &ctx, review_memory_at_end);
-                self.memory_on_session_end(ctx.get_messages());
                 if stream_mute.swap(false, Ordering::AcqRel) {
                     on_chunk(StreamChunk {
                         delta: Some(hermes_core::StreamDelta {
@@ -3539,16 +3663,17 @@ impl AgentLoop {
                         usage: None,
                     });
                 }
-                return Ok(AgentResult {
-                    messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                    finished_naturally: true,
+                return Ok(self.finalize_agent_result(
+                    &ctx,
                     total_turns,
-                    tool_errors,
-                    usage: accumulated_usage,
-                    interrupted: false,
-                    session_cost_usd: Some(session_cost_usd),
+                    &tool_errors,
+                    accumulated_usage,
+                    session_cost_usd,
                     session_started_hooks_fired,
-                });
+                    persist_user_idx,
+                    true,
+                    false,
+                ));
             }
 
             codex_ack_continuations = 0;
@@ -3609,17 +3734,17 @@ impl AgentLoop {
                         "Max invalid tool retries reached ({}). Last invalid tool: {}",
                         self.config.invalid_tool_call_max_retries, invalid_tool_calls[0]
                     )));
-                    self.memory_on_session_end(ctx.get_messages());
-                    return Ok(AgentResult {
-                        messages: self.messages_for_persisted_result(&ctx, persist_user_idx),
-                        finished_naturally: false,
+                    return Ok(self.finalize_agent_result(
+                        &ctx,
                         total_turns,
-                        tool_errors,
-                        usage: accumulated_usage,
-                        interrupted: false,
-                        session_cost_usd: Some(session_cost_usd),
+                        &tool_errors,
+                        accumulated_usage,
+                        session_cost_usd,
                         session_started_hooks_fired,
-                    });
+                        persist_user_idx,
+                        false,
+                        false,
+                    ));
                 }
                 for tc in &tool_calls {
                     let content = if self.tool_registry.get(&tc.function.name).is_none() {
@@ -4642,6 +4767,240 @@ mod tests {
         assert_eq!(config.rollback_on_tool_error_threshold, 3);
         assert!(!config.smart_model_routing.enabled);
         assert!(config.background_review_metrics_enabled);
+    }
+
+    #[test]
+    fn test_plugin_hooks_include_api_and_session_finalize_paths() {
+        use crate::plugins::{Plugin, PluginContext, PluginMeta};
+        use futures::stream::BoxStream;
+
+        struct DummyProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for DummyProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("done"),
+                    usage: None,
+                    model: "dummy".into(),
+                    finish_reason: Some("stop".into()),
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::empty().boxed()
+            }
+        }
+
+        struct CaptureHooksPlugin {
+            seen: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl Plugin for CaptureHooksPlugin {
+            fn meta(&self) -> PluginMeta {
+                PluginMeta {
+                    name: "capture-hooks".to_string(),
+                    version: "0.1.0".to_string(),
+                    description: "capture hook events".to_string(),
+                    author: None,
+                }
+            }
+
+            async fn initialize(&self) -> Result<(), AgentError> {
+                Ok(())
+            }
+
+            async fn shutdown(&self) -> Result<(), AgentError> {
+                Ok(())
+            }
+
+            fn register(&self, ctx: &mut PluginContext) {
+                let hook_types = [
+                    HookType::PreApiRequest,
+                    HookType::PostApiRequest,
+                    HookType::OnSessionEnd,
+                    HookType::OnSessionFinalize,
+                    HookType::OnSessionReset,
+                ];
+                for hook in hook_types {
+                    let seen = self.seen.clone();
+                    ctx.on(
+                        hook,
+                        Arc::new(move |_ctx| {
+                            seen.lock()
+                                .expect("seen lock")
+                                .push(hook.as_str().to_string());
+                            HookResult::Ok
+                        }),
+                    );
+                }
+            }
+        }
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut pm = PluginManager::new();
+        pm.register(Arc::new(CaptureHooksPlugin { seen: seen.clone() }));
+        let pm = Arc::new(std::sync::Mutex::new(pm));
+
+        let agent = AgentLoop::new(
+            AgentConfig::default(),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(DummyProvider),
+        )
+        .with_plugins(pm);
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _ = rt
+            .block_on(agent.run(vec![Message::user("/reset")], None))
+            .expect("agent run should succeed");
+
+        let seen = seen.lock().expect("seen lock");
+        for required in [
+            "pre_api_request",
+            "post_api_request",
+            "on_session_end",
+            "on_session_finalize",
+            "on_session_reset",
+        ] {
+            assert!(
+                seen.iter().any(|name| name == required),
+                "missing required hook: {required}; seen={:?}",
+                *seen
+            );
+        }
+    }
+
+    #[test]
+    fn test_plugin_hooks_include_api_paths_in_stream_mode() {
+        use crate::plugins::{Plugin, PluginContext, PluginMeta};
+        use futures::stream::BoxStream;
+
+        struct StreamingProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for StreamingProvider {
+            async fn chat_completion(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> Result<hermes_core::LlmResponse, AgentError> {
+                Ok(hermes_core::LlmResponse {
+                    message: Message::assistant("done"),
+                    usage: None,
+                    model: "dummy".into(),
+                    finish_reason: Some("stop".into()),
+                })
+            }
+
+            fn chat_completion_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _max_tokens: Option<u32>,
+                _temperature: Option<f64>,
+                _model: Option<&str>,
+                _extra_body: Option<&serde_json::Value>,
+            ) -> BoxStream<'static, Result<StreamChunk, AgentError>> {
+                futures::stream::iter(vec![
+                    Ok(StreamChunk {
+                        delta: Some(hermes_core::StreamDelta {
+                            content: Some("stream-done".to_string()),
+                            tool_calls: None,
+                            extra: None,
+                        }),
+                        finish_reason: None,
+                        usage: None,
+                    }),
+                    Ok(StreamChunk {
+                        delta: None,
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                    }),
+                ])
+                .boxed()
+            }
+        }
+
+        struct CaptureHooksPlugin {
+            seen: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl Plugin for CaptureHooksPlugin {
+            fn meta(&self) -> PluginMeta {
+                PluginMeta {
+                    name: "capture-hooks-stream".to_string(),
+                    version: "0.1.0".to_string(),
+                    description: "capture stream hook events".to_string(),
+                    author: None,
+                }
+            }
+
+            async fn initialize(&self) -> Result<(), AgentError> {
+                Ok(())
+            }
+
+            async fn shutdown(&self) -> Result<(), AgentError> {
+                Ok(())
+            }
+
+            fn register(&self, ctx: &mut PluginContext) {
+                for hook in [HookType::PreApiRequest, HookType::PostApiRequest] {
+                    let seen = self.seen.clone();
+                    ctx.on(
+                        hook,
+                        Arc::new(move |_ctx| {
+                            seen.lock()
+                                .expect("seen lock")
+                                .push(hook.as_str().to_string());
+                            HookResult::Ok
+                        }),
+                    );
+                }
+            }
+        }
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut pm = PluginManager::new();
+        pm.register(Arc::new(CaptureHooksPlugin { seen: seen.clone() }));
+        let pm = Arc::new(std::sync::Mutex::new(pm));
+
+        let agent = AgentLoop::new(
+            AgentConfig::default(),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(StreamingProvider),
+        )
+        .with_plugins(pm);
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _ = rt
+            .block_on(agent.run_stream(
+                vec![Message::user("stream hello")],
+                None,
+                Some(Box::new(|_| {})),
+            ))
+            .expect("stream run should succeed");
+
+        let seen = seen.lock().expect("seen lock");
+        assert!(seen.iter().any(|name| name == "pre_api_request"));
+        assert!(seen.iter().any(|name| name == "post_api_request"));
     }
 
     #[test]

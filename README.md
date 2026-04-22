@@ -135,6 +135,7 @@ bash scripts/ci/keypath-e2e.sh  # Core end-to-end paths
 ```
 
 See [AGENTS.md](AGENTS.md) for architecture details and coding conventions.
+Plugin hook payload contracts are documented in [HOOK_PAYLOAD_SCHEMA.md](HOOK_PAYLOAD_SCHEMA.md).
 
 ## License
 
