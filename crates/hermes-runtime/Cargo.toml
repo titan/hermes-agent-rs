@@ -1,0 +1,24 @@
+[package]
+name = "hermes-runtime"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Unified runtime composition for Hermes subsystems"
+
+[dependencies]
+hermes-core = { workspace = true }
+hermes-agent = { workspace = true }
+hermes-gateway = { workspace = true }
+hermes-dashboard = { workspace = true }
+hermes-cron = { workspace = true }
+hermes-config = { workspace = true }
+hermes-tools = { workspace = true }
+hermes-skills = { workspace = true }
+hermes-environments = { workspace = true }
+hermes-bus = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
