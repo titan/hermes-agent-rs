@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-primary: #0a0a0a;
+  --color-bg-secondary: #111111;
+  --color-bg-tertiary: #1a1a1a;
+  --color-bg-hover: #222222;
+  --color-bg-active: #2a2a2a;
+  --color-bg-card: #161616;
+  --color-bg-card-hover: #1e1e1e;
+  --color-border-primary: #262626;
+  --color-border-secondary: #333333;
+  --color-text-primary: #e5e5e5;
+  --color-text-secondary: #a3a3a3;
+  --color-text-muted: #737373;
+  --color-accent: #f97316;
+  --color-accent-hover: #fb923c;
+  --color-success: #22c55e;
+  --color-error: #ef4444;
+  --color-warning: #eab308;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Drag region handled by data-tauri-drag-region attribute */
+
+/* Selection */
+::selection {
+  background: rgba(249, 115, 22, 0.3);
+}
+
+body {
+  overflow: hidden;
+  user-select: none;
+}

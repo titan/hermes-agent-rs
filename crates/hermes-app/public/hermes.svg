@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1a1a1a"/>
+      <stop offset="100%" stop-color="#0a0a0a"/>
+    </linearGradient>
+    <linearGradient id="wing" x1="100" y1="120" x2="420" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f97316"/>
+      <stop offset="50%" stop-color="#fb923c"/>
+      <stop offset="100%" stop-color="#f97316"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="256" y1="100" x2="256" y2="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fb923c" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#f97316" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+
+  <!-- Subtle glow behind the icon -->
+  <circle cx="256" cy="260" r="140" fill="url(#glow)"/>
+
+  <!-- Hermes winged helmet — stylized H with wings -->
+
+  <!-- Central pillar of H -->
+  <rect x="230" y="160" width="52" height="210" rx="26" fill="url(#wing)"/>
+
+  <!-- Crossbar of H -->
+  <rect x="170" y="240" width="172" height="40" rx="20" fill="url(#wing)"/>
+
+  <!-- Left wing -->
+  <path d="M170 220 C170 220 120 170 90 140 C80 130 75 135 80 148 C95 185 130 215 170 235Z" fill="url(#wing)" opacity="0.9"/>
+  <path d="M165 200 C165 200 125 155 100 125 C90 113 83 118 90 132 C105 165 135 192 165 210Z" fill="url(#wing)" opacity="0.7"/>
+  <path d="M160 180 C160 180 130 142 110 115 C102 105 95 110 102 122 C115 150 140 175 160 190Z" fill="url(#wing)" opacity="0.5"/>
+
+  <!-- Right wing -->
+  <path d="M342 220 C342 220 392 170 422 140 C432 130 437 135 432 148 C417 185 382 215 342 235Z" fill="url(#wing)" opacity="0.9"/>
+  <path d="M347 200 C347 200 387 155 412 125 C422 113 429 118 422 132 C407 165 377 192 347 210Z" fill="url(#wing)" opacity="0.7"/>
+  <path d="M352 180 C352 180 382 142 402 115 C410 105 417 110 410 122 C397 150 372 175 352 190Z" fill="url(#wing)" opacity="0.5"/>
+
+  <!-- AI dot / eye -->
+  <circle cx="256" cy="195" r="10" fill="#0a0a0a"/>
+  <circle cx="256" cy="195" r="6" fill="#fb923c"/>
+  <circle cx="258" cy="193" r="2" fill="white" opacity="0.8"/>
+
+  <!-- Bottom accent line -->
+  <rect x="206" y="385" width="100" height="4" rx="2" fill="#f97316" opacity="0.6"/>
+</svg>
