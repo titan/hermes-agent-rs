@@ -14,7 +14,7 @@ Rust rewrite of [Hermes Agent](https://github.com/NousResearch/hermes-agent) by 
 
 ---
 
-> **v0.1 Status:** Core agent loop, 10 LLM providers, 30 tool backends, 17 platform adapters, memory system, and CLI/TUI are production-ready. Known limitations: parity roadmap modules outside this runtime surface are still being completed (see `PARITY_PLAN.md`).
+> **v0.1 Status:** Core agent loop, 10 LLM providers, 30 tool backends, 17 platform adapters, memory system, and CLI/TUI are production-ready.
 
 ## Why Hermes?
 
@@ -29,13 +29,13 @@ Rust rewrite of [Hermes Agent](https://github.com/NousResearch/hermes-agent) by 
 ## Quick Start
 
 ```bash
-# Install
+# Install (auto-detects OS and CPU)
 curl -fsSL https://raw.githubusercontent.com/Lumio-Research/hermes-agent-rs/main/scripts/install.sh | bash
 
 # Set your API key
 echo "ANTHROPIC_API_KEY=sk-..." >> ~/.hermes/.env
 
-# Run
+# Run interactive session
 hermes
 ```
 
@@ -55,6 +55,14 @@ hermes
 
 ```bash
 hermes chat --query "Refactor auth.rs to use the new error types"
+```
+
+**Start the full server** — API + platform gateway + cron, all in one:
+
+```bash
+hermes serve                          # API + gateway + cron
+hermes serve --no-gateway             # API only (for dashboard UI)
+hermes serve --no-gateway --no-cron   # API only (minimal)
 ```
 
 **Multi-platform gateway** — connect Telegram, Discord, Slack, and more simultaneously:
@@ -86,27 +94,58 @@ mcp:
 ## Architecture
 
 ```
-hermes-cli                    # Binary entry point, TUI, slash commands
-├── hermes-agent              # Agent loop, LLM providers, memory plugins
-│   ├── hermes-core           # Shared types, traits, error hierarchy
-│   ├── hermes-intelligence   # Model routing, prompt building, self-evolution
-│   └── hermes-config         # Config loading, YAML/env merging
-├── hermes-tools              # 30+ tool backends, approval engine
-├── hermes-gateway            # 17 platform adapters, session management
-├── hermes-environments       # Terminal: Local/Docker/SSH/Daytona/Modal/Singularity
-├── hermes-mcp                # Model Context Protocol client/server
-├── hermes-acp                # Agent Communication Protocol
-├── hermes-skills             # Skill management and hub
-├── hermes-cron               # Cron scheduling
-├── hermes-server             # HTTP/WebSocket API server
-├── hermes-auth               # OAuth token exchange
-├── hermes-eval               # SWE-bench, Terminal-Bench, YC Bench
-└── hermes-telemetry          # OpenTelemetry + Prometheus
+hermes-agent-rs/
+├── crates/
+│   ├── hermes-cli              # Binary entry point, TUI, slash commands
+│   ├── hermes-agent            # Agent loop, LLM providers, memory plugins
+│   ├── hermes-core             # Shared types, traits, error hierarchy
+│   ├── hermes-intelligence     # Model routing, prompt building, self-evolution
+│   ├── hermes-config           # Config loading, YAML/env merging
+│   ├── hermes-tools            # 30+ tool backends, approval engine
+│   ├── hermes-gateway          # 17 platform adapters, session management
+│   ├── hermes-server           # HTTP/WebSocket API server
+│   ├── hermes-runtime          # Unified runtime builder (server + gateway + cron)
+│   ├── hermes-environments     # Terminal: Local/Docker/SSH/Daytona/Modal/Singularity
+│   ├── hermes-mcp              # Model Context Protocol client/server
+│   ├── hermes-acp              # Agent Communication Protocol
+│   ├── hermes-skills           # Skill management and hub
+│   ├── hermes-cron             # Cron scheduling
+│   ├── hermes-bus              # In-process message bus (agent service abstraction)
+│   ├── hermes-auth             # OAuth token exchange
+│   ├── hermes-eval             # SWE-bench, Terminal-Bench, YC Bench
+│   └── hermes-telemetry        # OpenTelemetry + Prometheus
+├── apps/
+│   ├── dashboard/              # Web management UI (React + Vite + Tailwind)
+│   └── client/                 # Cross-platform client (Tauri 2 — macOS/Windows/Linux/iOS/Android)
+└── scripts/                    # Install, CI, and convenience scripts
 ```
 
-**Key traits:** `LlmProvider` (10 providers) · `ToolHandler` (30+ backends) · `PlatformAdapter` (17 platforms) · `TerminalBackend` (6 backends) · `MemoryProvider` (8 plugins)
+**Key traits:** `LlmProvider` (10 providers) · `ToolHandler` (30+ backends) · `PlatformAdapter` (17 platforms) · `TerminalBackend` (6 backends) · `MemoryProvider` (8 plugins) · `AgentService` (local/remote transparent)
 
 **Tool call parsers:** Hermes, Anthropic, OpenAI, Qwen, Llama, DeepSeek, Auto
+
+## CLI Commands
+
+```
+hermes                    # Interactive REPL (default)
+hermes chat               # Single-shot query
+hermes serve              # Start API server + gateway + cron
+hermes gateway            # Platform gateway only (no API)
+hermes config             # Configuration management
+hermes model              # Model / provider management
+hermes auth               # Authentication (login/logout/status)
+hermes tools              # Tool management
+hermes mcp                # MCP server management
+hermes skills             # Skill management
+hermes plugins            # Plugin management
+hermes sessions           # Session management
+hermes memory             # Memory provider management
+hermes cron               # Cron job management
+hermes setup              # Interactive setup wizard
+hermes doctor             # Health check
+hermes status             # Running status
+hermes version            # Version info
+```
 
 ## Install
 
@@ -130,20 +169,66 @@ cargo install --git https://github.com/Lumio-Research/hermes-agent-rs hermes-cli
 docker run --rm -it -v ~/.hermes:/root/.hermes ghcr.io/lumio-research/hermes-agent-rs
 ```
 
-## Contributing
+## Development
 
-Contributions welcome. Run the test suite before submitting:
+**Prerequisites:** Rust 1.75+, Node.js 20+ (for dashboard/client apps)
 
 ```bash
-cargo test --workspace        # 1,428 tests
-cargo clippy --workspace --all-targets -- -D warnings  # Lint (warnings fail CI)
-cargo fmt --all --check       # Format
-bash scripts/ci/smoke.sh      # Release binary smoke check
-bash scripts/ci/keypath-e2e.sh  # Core end-to-end paths
+# Build the CLI
+cargo build -p hermes-cli
+
+# Run directly (skips cargo lock contention with rust-analyzer)
+scripts/hermes
+
+# Run tests
+cargo test --workspace
+
+# Lint
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Format
+cargo fmt --all --check
 ```
 
+**Dashboard UI** (web management panel):
+
+```bash
+cd apps/dashboard
+npm install
+npm run dev          # Vite dev server with HMR, proxies /api to hermes serve
+```
+
+**Client app** (Tauri cross-platform):
+
+```bash
+cd apps/client
+pnpm install
+pnpm tauri dev       # Launches Tauri dev window
+```
+
+## Contributing
+
+Contributions welcome. Before submitting a PR:
+
+1. Run the full test suite:
+   ```bash
+   cargo test --workspace                                    # 1,428 tests
+   cargo clippy --workspace --all-targets -- -D warnings     # Lint (warnings fail CI)
+   cargo fmt --all --check                                   # Format
+   ```
+
+2. Run smoke tests:
+   ```bash
+   bash scripts/ci/smoke.sh          # Release binary smoke check
+   bash scripts/ci/keypath-e2e.sh    # Core end-to-end paths
+   ```
+
+3. If you changed `apps/dashboard`:
+   ```bash
+   cd apps/dashboard && npm run build
+   ```
+
 See [AGENTS.md](AGENTS.md) for architecture details and coding conventions.
-Plugin hook payload contracts are documented in [HOOK_PAYLOAD_SCHEMA.md](HOOK_PAYLOAD_SCHEMA.md).
 
 ## License
 
