@@ -20,9 +20,9 @@ use hermes_cli::app::provider_api_key_from_env;
 use hermes_cli::cli::{Cli, CliCommand};
 use hermes_cli::App;
 use hermes_config::{
-    apply_user_config_patch, gateway_pid_path_in, hermes_home, load_config, load_user_config_file,
-    save_config_yaml, state_dir, user_config_field_display, validate_config, ConfigError,
-    PlatformConfig,
+    apply_user_config_patch, extra_string, gateway_pid_path_in, hermes_home, load_config,
+    load_user_config_file, platform_token_or_extra, save_config_yaml, state_dir,
+    user_config_field_display, validate_config, ConfigError, PlatformConfig,
 };
 use hermes_core::AgentError;
 #[cfg(test)]
@@ -50,10 +50,35 @@ async fn main() {
             preload_skill,
             yolo,
         } => hermes_cli::commands::handle_cli_chat(query, preload_skill, yolo).await,
-        CliCommand::Model { provider_model } => run_model(cli, provider_model).await,
+        CliCommand::Model { provider_model, sub_action, sub_arg } => {
+            // "hermes model provider list" → delegate to runtime-provider handler
+            if provider_model.as_deref() == Some("provider") {
+                hermes_cli::commands::handle_cli_runtime_provider(sub_action, sub_arg).await
+            } else {
+                run_model(cli, provider_model).await
+            }
+        }
         CliCommand::Tools { action } => run_tools(cli, action).await,
-        CliCommand::Config { action, key, value } => run_config(cli, action, key, value).await,
-        CliCommand::Gateway { action } => run_gateway(cli, action).await,
+        CliCommand::Config { action, key, value } => {
+            // "hermes config set region <value>" → delegate to region handler
+            if action.as_deref() == Some("set") && key.as_deref() == Some("region") {
+                hermes_cli::commands::handle_cli_region(Some("set".to_string()), value).await
+            } else {
+                run_config(cli, action, key, value).await
+            }
+        }
+        CliCommand::Gateway { action, platform } => {
+            // "hermes gateway setup whatsapp" → delegate to whatsapp handler
+            if action.as_deref() == Some("setup") && platform.is_some() {
+                let plat = platform.unwrap();
+                match plat.as_str() {
+                    "whatsapp" | "wa" => hermes_cli::commands::handle_cli_whatsapp(Some("setup".to_string())).await,
+                    _ => run_gateway(cli, action).await,
+                }
+            } else {
+                run_gateway(cli, action).await
+            }
+        }
         CliCommand::Setup => run_setup().await,
         CliCommand::Doctor => run_doctor(cli).await,
         CliCommand::Update => run_update().await,
@@ -64,7 +89,15 @@ async fn main() {
             action,
             provider,
             qr,
-        } => run_auth(cli, action, provider, qr).await,
+            model,
+        } => {
+            // "hermes auth login lumio" → delegate to lumio handler
+            if action.as_deref() == Some("login") && provider.as_deref() == Some("lumio") {
+                run_lumio(Some("login".to_string()), model).await
+            } else {
+                run_auth(cli, action, provider, qr).await
+            }
+        }
         CliCommand::Skills {
             action,
             name,
@@ -84,23 +117,27 @@ async fn main() {
             )
             .await
         }
-        CliCommand::Memory { action } => hermes_cli::commands::handle_cli_memory(action).await,
+        CliCommand::Memory { action, provider } => {
+            // "hermes memory setup redis" → delegate to memory-setup handler
+            if action.as_deref() == Some("setup") || provider.is_some() {
+                hermes_cli::commands::handle_cli_memory_setup(action, provider).await
+            } else {
+                hermes_cli::commands::handle_cli_memory(action).await
+            }
+        }
         CliCommand::Mcp { action, server } => {
             hermes_cli::commands::handle_cli_mcp(action, server).await
         }
-        CliCommand::Sessions { action, id, name } => {
-            hermes_cli::commands::handle_cli_sessions(action, id, name).await
+        CliCommand::Sessions { action, id, name, output } => {
+            // "hermes sessions dump" → delegate to dump
+            if action.as_deref() == Some("dump") {
+                run_dump(cli, id, output).await
+            } else if action.as_deref() == Some("stats") {
+                hermes_cli::commands::handle_cli_insights(30, None).await
+            } else {
+                hermes_cli::commands::handle_cli_sessions(action, id, name).await
+            }
         }
-        CliCommand::Insights { days, source } => {
-            hermes_cli::commands::handle_cli_insights(days, source).await
-        }
-        CliCommand::Login { provider } => hermes_cli::commands::handle_cli_login(provider).await,
-        CliCommand::Logout { provider } => hermes_cli::commands::handle_cli_logout(provider).await,
-        CliCommand::Whatsapp { action } => hermes_cli::commands::handle_cli_whatsapp(action).await,
-        CliCommand::Pairing { action, device_id } => {
-            hermes_cli::commands::handle_cli_pairing(action, device_id).await
-        }
-        CliCommand::Claw { action } => hermes_cli::commands::handle_cli_claw(action).await,
         CliCommand::Acp { action } => hermes_cli::commands::handle_cli_acp(action).await,
         CliCommand::Backup { output } => hermes_cli::commands::handle_cli_backup(output).await,
         CliCommand::Import { path } => hermes_cli::commands::handle_cli_import(path).await,
@@ -111,37 +148,16 @@ async fn main() {
             schedule,
             prompt,
         } => run_cron(cli, action, id, schedule, prompt).await,
-        CliCommand::Webhook { action, url, id } => run_webhook(cli, action, url, id).await,
-        CliCommand::Web { host, port, no_open } => run_web(host, port, no_open).await,
         CliCommand::Serve {
+            action,
             host,
             port,
-            no_dashboard,
-            no_platforms,
+            no_gateway,
             no_cron,
-        } => run_serve(host, port, no_dashboard, no_platforms, no_cron).await,
-        CliCommand::Dump { session, output } => run_dump(cli, session, output).await,
+        } => run_serve(cli, action, host, port, no_gateway, no_cron).await,
         CliCommand::Completion { shell } => run_completion(shell),
         CliCommand::Uninstall { yes } => run_uninstall(yes).await,
-        CliCommand::Lumio { action, model } => run_lumio(action, model).await,
-        CliCommand::Region { action, region } => {
-            hermes_cli::commands::handle_cli_region(action, region).await
-        }
-        CliCommand::MemorySetup { action, provider } => {
-            hermes_cli::commands::handle_cli_memory_setup(action, provider).await
-        }
-        CliCommand::RuntimeProvider { action, provider } => {
-            hermes_cli::commands::handle_cli_runtime_provider(action, provider).await
-        }
-        CliCommand::Subscription { action } => {
-            hermes_cli::commands::handle_cli_subscription(action).await
-        }
-        CliCommand::CodexModels { action, model } => {
-            hermes_cli::commands::handle_cli_codex_models(action, model).await
-        }
-        CliCommand::Clipboard { action } => {
-            hermes_cli::commands::handle_cli_clipboard(action).await
-        }
+
     };
 
     if let Err(e) = result {
@@ -379,6 +395,10 @@ fn gateway_pid_path_for_cli(cli: &Cli) -> PathBuf {
     gateway_pid_path_in(hermes_state_root(cli))
 }
 
+fn serve_pid_path_for_cli(cli: &Cli) -> PathBuf {
+    hermes_state_root(cli).join("serve.pid")
+}
+
 fn read_gateway_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
@@ -442,6 +462,7 @@ async fn run_gateway(cli: Cli, action: Option<String>) -> Result<(), AgentError>
                 .map_err(|e| AgentError::Io(format!("failed to write PID file: {}", e)))?;
 
             let res = hermes_runtime::RuntimeBuilder::new(config.clone())
+                .with_plugin_manager(hermes_runtime::empty_plugin_manager())
                 .with_platforms()
                 .with_cron()
                 .run()
@@ -968,102 +989,18 @@ async fn run_gateway_setup(cli: &Cli) -> Result<(), AgentError> {
     Ok(())
 }
 
-fn platform_token_or_extra(platform_cfg: &PlatformConfig) -> Option<String> {
-    platform_cfg
-        .token
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            platform_cfg
-                .extra
-                .get("token")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-        })
-}
-
-#[cfg(test)]
-fn extra_string(platform_cfg: &PlatformConfig, key: &str) -> Option<String> {
-    platform_cfg
-        .extra
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-}
-
-#[cfg(test)]
-fn gateway_requirement_issues(config: &hermes_config::GatewayConfig) -> Vec<String> {
-    let mut issues = Vec::new();
-
-    let check = |enabled: bool, cond: bool| enabled && !cond;
-
-    if let Some(p) = config.platforms.get("telegram") {
-        if check(p.enabled, platform_token_or_extra(p).is_some()) {
-            issues.push("telegram.enabled=true 但缺少 token".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("weixin") {
-        let account_id = extra_string(p, "account_id").is_some();
-        let token = platform_token_or_extra(p).is_some();
-        if check(p.enabled, account_id && token) {
-            issues.push("weixin.enabled=true 但缺少 account_id 或 token".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("discord") {
-        if check(p.enabled, platform_token_or_extra(p).is_some()) {
-            issues.push("discord.enabled=true 但缺少 token".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("slack") {
-        if check(p.enabled, platform_token_or_extra(p).is_some()) {
-            issues.push("slack.enabled=true 但缺少 token".to_string());
-        }
-    }
-    if let Some(p) = config
-        .platforms
-        .get("qqbot")
-        .or_else(|| config.platforms.get("qq"))
-    {
-        let app_id = extra_string(p, "app_id").is_some();
-        let secret = extra_string(p, "client_secret").is_some();
-        if check(p.enabled, app_id && secret) {
-            issues.push("qqbot.enabled=true 但缺少 app_id 或 client_secret".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("wecom_callback") {
-        let ready = extra_string(p, "corp_id").is_some()
-            && extra_string(p, "corp_secret").is_some()
-            && extra_string(p, "agent_id").is_some()
-            && platform_token_or_extra(p)
-                .or_else(|| extra_string(p, "token"))
-                .is_some()
-            && extra_string(p, "encoding_aes_key").is_some();
-        if check(p.enabled, ready) {
-            issues.push(
-                "wecom_callback.enabled=true 但缺少 corp_id/corp_secret/agent_id/token/encoding_aes_key"
-                    .to_string(),
-            );
-        }
-    }
-
-    issues
-}
-
 #[cfg(test)]
 async fn register_gateway_adapters(
     config: &hermes_config::GatewayConfig,
     gateway: Arc<Gateway>,
     sidecar_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
 ) -> Result<hermes_gateway::platform_registry::RegistrationSummary, AgentError> {
-    let summary =
-        hermes_gateway::platform_registry::register_platforms(gateway.as_ref(), config, sidecar_tasks)
-            .await?;
+    let summary = hermes_gateway::platform_registry::register_platforms(
+        gateway.as_ref(),
+        config,
+        sidecar_tasks,
+    )
+    .await?;
 
     #[cfg(test)]
     {
@@ -2084,10 +2021,6 @@ async fn run_cron(
     Ok(())
 }
 
-fn webhook_store_path(cli: &Cli) -> PathBuf {
-    hermes_state_root(&cli).join("webhooks.json")
-}
-
 async fn prompt_line(prompt: impl Into<String>) -> Result<String, AgentError> {
     let prompt = prompt.into();
     let line = tokio::task::spawn_blocking(move || {
@@ -2135,127 +2068,123 @@ async fn resolve_llm_login_token(cli: &Cli, provider: &str) -> Result<String, Ag
     Ok(pasted)
 }
 
-async fn run_web(host: String, port: u16, no_open: bool) -> Result<(), AgentError> {
-    let config = hermes_config::load_config(None).map_err(|e| AgentError::Config(e.to_string()))?;
-    let addr: std::net::SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .map_err(|e| AgentError::Config(format!("invalid address: {}", e)))?;
-
-    println!("Starting Hermes web dashboard on http://{}", addr);
-
-    if !no_open {
-        let url = format!("http://{}", addr);
-        // Try to open browser (best-effort)
-        let _ = std::process::Command::new("open").arg(&url).spawn()
-            .or_else(|_| std::process::Command::new("xdg-open").arg(&url).spawn());
-    }
-
-    hermes_runtime::RuntimeBuilder::new(config)
-        .with_dashboard(addr)
-        .run()
-        .await
-}
-
 async fn run_serve(
-    host: String,
-    port: u16,
-    no_dashboard: bool,
-    no_platforms: bool,
-    no_cron: bool,
-) -> Result<(), AgentError> {
-    let config = hermes_config::load_config(None).map_err(|e| AgentError::Config(e.to_string()))?;
-    let addr: std::net::SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .map_err(|e| AgentError::Config(format!("invalid address: {}", e)))?;
-
-    let mut builder = hermes_runtime::RuntimeBuilder::new(config);
-    if !no_dashboard {
-        builder = builder.with_dashboard(addr);
-    }
-    if !no_platforms {
-        builder = builder.with_platforms();
-    }
-    if !no_cron {
-        builder = builder.with_cron();
-    }
-
-    println!(
-        "Starting unified runtime (dashboard={}, platforms={}, cron={})",
-        !no_dashboard,
-        !no_platforms,
-        !no_cron
-    );
-    if !no_dashboard {
-        println!("Dashboard listening at http://{}", addr);
-    }
-
-    builder.run().await
-}
-
-async fn run_webhook(
     cli: Cli,
     action: Option<String>,
-    url: Option<String>,
-    id: Option<String>,
+    host: String,
+    port: u16,
+    no_gateway: bool,
+    no_cron: bool,
 ) -> Result<(), AgentError> {
-    let path = webhook_store_path(&cli);
-    let mut store = hermes_cli::webhook_delivery::load_webhook_store(&path)?;
+    match action.as_deref() {
+        None | Some("start") => {
+            let config = hermes_config::load_config(cli.config_dir.as_deref())
+                .map_err(|e| AgentError::Config(e.to_string()))?;
+            let addr: std::net::SocketAddr = format!("{}:{}", host, port)
+                .parse()
+                .map_err(|e| AgentError::Config(format!("invalid address: {}", e)))?;
 
-    match action.as_deref().unwrap_or("list") {
-        "list" => {
-            if store.webhooks.is_empty() {
-                println!("(no webhooks in {})", path.display());
+            let pid_path = serve_pid_path_for_cli(&cli);
+            if let Some(pid) = read_gateway_pid(&pid_path) {
+                if gateway_pid_is_alive(pid) {
+                    println!(
+                        "Serve already appears to be running (PID {}, file {}). Stop it first or remove a stale PID file.",
+                        pid,
+                        pid_path.display()
+                    );
+                    return Ok(());
+                }
+                let _ = std::fs::remove_file(&pid_path);
+            }
+            if let Some(parent) = pid_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&pid_path, format!("{}\n", std::process::id()))
+                .map_err(|e| AgentError::Io(format!("failed to write PID file: {}", e)))?;
+
+            let mut builder = hermes_runtime::RuntimeBuilder::new(config)
+                .with_plugin_manager(hermes_runtime::empty_plugin_manager())
+                .with_dashboard(addr);
+            if !no_gateway {
+                builder = builder.with_platforms();
+            }
+            if !no_cron {
+                builder = builder.with_cron();
+            }
+
+            println!(
+                "Starting unified runtime (api=true, gateway={}, cron={})",
+                !no_gateway, !no_cron
+            );
+            println!("API server listening at http://{}", addr);
+
+            let res = builder.run().await;
+            let _ = std::fs::remove_file(&pid_path);
+            res
+        }
+        Some("status") => {
+            let pid_path = serve_pid_path_for_cli(&cli);
+            match std::fs::read_to_string(&pid_path) {
+                Ok(raw) => match raw.trim().parse::<u32>() {
+                    Ok(pid) if gateway_pid_is_alive(pid) => {
+                        println!(
+                            "Serve status: running (PID {}, file {})",
+                            pid,
+                            pid_path.display()
+                        );
+                    }
+                    Ok(pid) => {
+                        println!(
+                            "Serve status: not running (stale PID {} in {})",
+                            pid,
+                            pid_path.display()
+                        );
+                    }
+                    Err(_) => {
+                        println!("Serve status: invalid PID file at {}", pid_path.display());
+                    }
+                },
+                Err(_) => {
+                    println!(
+                        "Serve status: not running (no PID file; start with `hermes serve start`)"
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some("stop") => {
+            let pid_path = serve_pid_path_for_cli(&cli);
+            let Some(pid) = read_gateway_pid(&pid_path) else {
+                println!("Serve stop: no PID file (nothing to stop).");
+                return Ok(());
+            };
+            if !gateway_pid_is_alive(pid) {
+                let _ = std::fs::remove_file(&pid_path);
+                println!(
+                    "Serve stop: process {} not running; removed stale PID file {}.",
+                    pid,
+                    pid_path.display()
+                );
                 return Ok(());
             }
-            println!("Webhooks ({}):", path.display());
-            for w in &store.webhooks {
-                println!("  {}  {}  {}", w.id, w.url, w.created_at);
+            match gateway_pid_terminate(pid) {
+                Ok(()) => {
+                    println!("Sent SIGTERM to serve PID {}.", pid);
+                    let _ = std::fs::remove_file(&pid_path);
+                    println!("Removed {}.", pid_path.display());
+                }
+                Err(e) => println!("Serve stop: failed to signal PID {}: {}", pid, e),
             }
+            Ok(())
         }
-        "add" => {
-            let url = url
-                .filter(|u| !u.is_empty())
-                .ok_or_else(|| AgentError::Config("webhook add: use --url https://...".into()))?;
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err(AgentError::Config(
-                    "webhook URL must start with http:// or https://".into(),
-                ));
-            }
-            let rec = hermes_cli::webhook_delivery::WebhookRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                url: url.clone(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            };
-            store.webhooks.push(rec.clone());
-            hermes_cli::webhook_delivery::save_webhook_store(&path, &store)?;
-            println!("Added webhook {} -> {}", rec.id, rec.url);
-        }
-        "remove" => {
-            let before = store.webhooks.len();
-            if let Some(rid) = id.filter(|s| !s.is_empty()) {
-                store.webhooks.retain(|w| w.id != rid);
-            } else if let Some(u) = url.filter(|s| !s.is_empty()) {
-                store.webhooks.retain(|w| w.url != u);
-            } else {
-                return Err(AgentError::Config(
-                    "webhook remove: use --id <id> or --url <exact-url>".into(),
-                ));
-            }
-            if store.webhooks.len() == before {
-                println!("No matching webhook removed.");
-            } else {
-                hermes_cli::webhook_delivery::save_webhook_store(&path, &store)?;
-                println!("Updated {}", path.display());
-            }
-        }
-        other => {
-            return Err(AgentError::Config(format!(
-                "Unknown webhook action: {} (use list|add|remove)",
+        Some(other) => {
+            println!(
+                "Unknown serve action: {}. Use 'start', 'stop', or 'status'.",
                 other
-            )));
+            );
+            Ok(())
         }
     }
-    Ok(())
 }
 
 async fn run_dump(
@@ -2957,7 +2886,7 @@ mod tests {
         config
             .platforms
             .insert("qqbot".to_string(), make_platform(true, None));
-        let issues = gateway_requirement_issues(&config);
+        let issues = hermes_gateway::gateway_requirement_issues(&config);
         assert!(issues.iter().any(|s| s.contains("telegram")));
         assert!(issues.iter().any(|s| s.contains("qqbot")));
     }
@@ -2993,7 +2922,7 @@ mod tests {
             .platforms
             .insert("wecom_callback".to_string(), wecom_cb);
 
-        assert!(gateway_requirement_issues(&config).is_empty());
+        assert!(hermes_gateway::gateway_requirement_issues(&config).is_empty());
     }
 
     #[tokio::test]
