@@ -2,12 +2,12 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use hermes_agent::agent_builder::{bridge_tool_registry, build_provider};
 use hermes_agent::session_persistence::SessionPersistence;
-use hermes_agent::LocalAgentService;
+use hermes_agent::{install_plugin_tools_into_registry, LocalAgentService, PluginManager};
 use hermes_bus::messages::{
     AgentResponse, AgentStreamChunk, BusMessage, SessionQueryAction, SessionResponse,
 };
@@ -25,13 +25,44 @@ use hermes_skills::{FileSkillStore, SkillManager};
 use hermes_tools::ToolRegistry;
 use tokio::sync::broadcast;
 
+/// Empty in-process [`PluginManager`] wrapped for CLI / default runtime wiring.
+///
+/// `hermes gateway start`, `hermes web`, and `hermes serve` pass this into
+/// [`RuntimeBuilder::with_plugin_manager`]. Custom binaries may `Arc::clone` a
+/// shared instance, lock, and [`PluginManager::register`] before [`RuntimeBuilder::run`]
+/// so [`install_plugin_tools_into_registry`] merges tools on startup.
+pub fn empty_plugin_manager() -> Arc<Mutex<PluginManager>> {
+    Arc::new(Mutex::new(PluginManager::new()))
+}
+
 /// Builder-pattern runtime composition for Dashboard / platform adapters / cron.
-#[derive(Debug, Clone)]
+///
+/// For gateway slash extensions, register [`hermes_gateway::register_slash_command_extension`]
+/// before [`RuntimeBuilder::run`] in the same process so the gateway sees them on startup.
+#[derive(Clone)]
 pub struct RuntimeBuilder {
     config: GatewayConfig,
     dashboard_addr: Option<SocketAddr>,
     enable_platforms: bool,
     enable_cron: bool,
+    /// Optional in-process plugins: tools merged into the shared [`ToolRegistry`] after
+    /// built-ins; [`PluginManager`] is also passed to [`LocalAgentService`] for hook callbacks.
+    plugin_manager: Option<Arc<Mutex<PluginManager>>>,
+}
+
+impl std::fmt::Debug for RuntimeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeBuilder")
+            .field("config", &self.config)
+            .field("dashboard_addr", &self.dashboard_addr)
+            .field("enable_platforms", &self.enable_platforms)
+            .field("enable_cron", &self.enable_cron)
+            .field(
+                "plugin_manager",
+                &self.plugin_manager.as_ref().map(|_| "<PluginManager>"),
+            )
+            .finish()
+    }
 }
 
 impl RuntimeBuilder {
@@ -42,6 +73,7 @@ impl RuntimeBuilder {
             dashboard_addr: None,
             enable_platforms: false,
             enable_cron: false,
+            plugin_manager: None,
         }
     }
 
@@ -63,10 +95,32 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Attach an in-process [`PluginManager`] (tools + hook callbacks for the local agent).
+    pub fn with_plugin_manager(mut self, plugin_manager: Arc<Mutex<PluginManager>>) -> Self {
+        self.plugin_manager = Some(plugin_manager);
+        self
+    }
+
     /// Start all configured subsystems.
     pub async fn run(self) -> Result<(), AgentError> {
         if self.dashboard_addr.is_none() && !self.enable_platforms && !self.enable_cron {
             return Ok(());
+        }
+
+        // Preflight gateway platform credentials **before** spawning bus/dashboard/cron work
+        // (see `.kiro/specs/.../gateway-requirements-single-source-rfc.md` Phase A).
+        if self.enable_platforms {
+            let requirement_issues = hermes_gateway::gateway_requirement_issues(&self.config);
+            if !requirement_issues.is_empty() {
+                let mut msg = String::from("Gateway requirement check failed:\n");
+                for issue in requirement_issues {
+                    msg.push_str("  - ");
+                    msg.push_str(&issue);
+                    msg.push('\n');
+                }
+                msg.push_str("请先执行 `hermes gateway setup` 或 `hermes auth login <provider>` 修复后再启动。");
+                return Err(AgentError::Config(msg));
+            }
         }
 
         let config = Arc::new(self.config.clone());
@@ -84,15 +138,32 @@ impl RuntimeBuilder {
         let skill_provider: Arc<dyn hermes_core::SkillProvider> =
             Arc::new(SkillManager::new(skill_store));
         hermes_tools::register_builtin_tools(&tool_registry, terminal_backend, skill_provider);
+        if let Some(pm) = self.plugin_manager.as_ref() {
+            let guard = pm.lock().map_err(|_| {
+                AgentError::Io("plugin manager mutex poisoned before tool install".to_string())
+            })?;
+            install_plugin_tools_into_registry(&tool_registry, &*guard);
+        }
         let mut sidecar_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         let session_persistence = Arc::new(SessionPersistence::new(&hermes_home));
         let _ = session_persistence.ensure_db();
-        let local_agent_service: Arc<dyn AgentService> = Arc::new(LocalAgentService::new(
-            config.clone(),
-            tool_registry.clone(),
-            session_persistence,
-        ));
+        let local_agent_service: Arc<dyn AgentService> = Arc::new(
+            if let Some(pm) = self.plugin_manager.clone() {
+                LocalAgentService::new_with_plugin_manager(
+                    config.clone(),
+                    tool_registry.clone(),
+                    session_persistence,
+                    pm,
+                )
+            } else {
+                LocalAgentService::new(
+                    config.clone(),
+                    tool_registry.clone(),
+                    session_persistence,
+                )
+            },
+        );
         let runtime_gateway_running = Arc::new(AtomicBool::new(false));
         let (bus_client, bus_server) = InProcessTransport::new(512);
         sidecar_tasks.push(tokio::spawn(run_bus_agent_service_loop(
@@ -104,37 +175,30 @@ impl RuntimeBuilder {
 
         let mut dashboard_task: Option<tokio::task::JoinHandle<Result<(), AgentError>>> = None;
         if let Some(addr) = self.dashboard_addr {
-            let dashboard_state = hermes_dashboard::HttpServerState::build_with_agent_service(
+            let dashboard_state = hermes_server::HttpServerState::build_with_agent_service(
                 (*config).clone(),
                 agent_service.clone(),
             )
             .await?
             .with_runtime_gateway_running(runtime_gateway_running.clone());
             dashboard_task = Some(tokio::spawn(async move {
-                hermes_dashboard::run_server_with_state(addr, dashboard_state).await
+                hermes_server::run_server_with_state(addr, dashboard_state).await
             }));
         }
 
         let mut gateway: Option<Arc<Gateway>> = None;
         if self.enable_platforms {
-            let requirement_issues = gateway_requirement_issues(&config);
-            if !requirement_issues.is_empty() {
-                let mut msg = String::from("Gateway requirement check failed:\n");
-                for issue in requirement_issues {
-                    msg.push_str("  - ");
-                    msg.push_str(&issue);
-                    msg.push('\n');
-                }
-                msg.push_str("请先执行 `hermes gateway setup` 或 `hermes auth login <provider>` 修复后再启动。");
-                return Err(AgentError::Config(msg));
-            }
             let runtime_gateway_config = RuntimeGatewayConfig {
                 streaming_enabled: config.streaming.enabled,
                 ..RuntimeGatewayConfig::default()
             };
             let session_manager = Arc::new(SessionManager::new(config.session.clone()));
             let dm_manager = DmManager::with_pair_behavior();
-            let gw = Arc::new(Gateway::new(session_manager, dm_manager, runtime_gateway_config));
+            let gw = Arc::new(Gateway::new(
+                session_manager,
+                dm_manager,
+                runtime_gateway_config,
+            ));
             let mut hook_registry = HookRegistry::new();
             hook_registry.register_builtins();
             hook_registry.discover_and_load(&hermes_home.join("hooks"));
@@ -142,12 +206,14 @@ impl RuntimeBuilder {
             gw.set_hook_registry(Arc::new(hook_registry)).await;
 
             let agent_service_for_gateway = agent_service.clone();
-            gw.set_message_handler_with_context(Arc::new(move |messages, ctx: GatewayRuntimeContext| {
-                let svc = agent_service_for_gateway.clone();
-                Box::pin(async move {
-                    runtime_send_with_agent_service(svc, &messages, &ctx).await
-                })
-            }))
+            gw.set_message_handler_with_context(Arc::new(
+                move |messages, ctx: GatewayRuntimeContext| {
+                    let svc = agent_service_for_gateway.clone();
+                    Box::pin(
+                        async move { runtime_send_with_agent_service(svc, &messages, &ctx).await },
+                    )
+                },
+            ))
             .await;
 
             let summary = hermes_gateway::platform_registry::register_platforms(
@@ -246,93 +312,7 @@ impl RuntimeBuilder {
     }
 }
 
-fn gateway_requirement_issues(config: &GatewayConfig) -> Vec<String> {
-    let mut issues = Vec::new();
-    let check = |enabled: bool, cond: bool| enabled && !cond;
-
-    if let Some(p) = config.platforms.get("telegram") {
-        if check(p.enabled, platform_token_or_extra(p).is_some()) {
-            issues.push("telegram.enabled=true 但缺少 token".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("weixin") {
-        let account_id = extra_string(p, "account_id").is_some();
-        let token = platform_token_or_extra(p).is_some();
-        if check(p.enabled, account_id && token) {
-            issues.push("weixin.enabled=true 但缺少 account_id 或 token".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("discord") {
-        if check(p.enabled, platform_token_or_extra(p).is_some()) {
-            issues.push("discord.enabled=true 但缺少 token".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("slack") {
-        if check(p.enabled, platform_token_or_extra(p).is_some()) {
-            issues.push("slack.enabled=true 但缺少 token".to_string());
-        }
-    }
-    if let Some(p) = config
-        .platforms
-        .get("qqbot")
-        .or_else(|| config.platforms.get("qq"))
-    {
-        let app_id = extra_string(p, "app_id").is_some();
-        let secret = extra_string(p, "client_secret").is_some();
-        if check(p.enabled, app_id && secret) {
-            issues.push("qqbot.enabled=true 但缺少 app_id 或 client_secret".to_string());
-        }
-    }
-    if let Some(p) = config.platforms.get("wecom_callback") {
-        let ready = extra_string(p, "corp_id").is_some()
-            && extra_string(p, "corp_secret").is_some()
-            && extra_string(p, "agent_id").is_some()
-            && platform_token_or_extra(p)
-                .or_else(|| extra_string(p, "token"))
-                .is_some()
-            && extra_string(p, "encoding_aes_key").is_some();
-        if check(p.enabled, ready) {
-            issues.push(
-                "wecom_callback.enabled=true 但缺少 corp_id/corp_secret/agent_id/token/encoding_aes_key"
-                    .to_string(),
-            );
-        }
-    }
-    issues
-}
-
-fn platform_token_or_extra(platform_cfg: &hermes_config::PlatformConfig) -> Option<String> {
-    platform_cfg
-        .token
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            platform_cfg
-                .extra
-                .get("token")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-        })
-}
-
-fn extra_string(platform_cfg: &hermes_config::PlatformConfig, key: &str) -> Option<String> {
-    platform_cfg
-        .extra
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-}
-
-async fn run_bus_agent_service_loop(
-    service: Arc<dyn AgentService>,
-    transport: InProcessTransport,
-) {
+async fn run_bus_agent_service_loop(service: Arc<dyn AgentService>, transport: InProcessTransport) {
     loop {
         let incoming = match transport.receive().await {
             Ok(msg) => msg,
@@ -430,22 +410,24 @@ async fn run_bus_agent_service_loop(
                             },
                         }
                     }
-                    SessionQueryAction::ResetSession => match service.reset_session(&query.session_id).await {
-                        Ok(()) => SessionResponse {
-                            request_id: query.request_id,
-                            sessions: Vec::new(),
-                            total: 0,
-                            messages: Vec::new(),
-                            error: None,
-                        },
-                        Err(err) => SessionResponse {
-                            request_id: query.request_id,
-                            sessions: Vec::new(),
-                            total: 0,
-                            messages: Vec::new(),
-                            error: Some(err.to_string()),
-                        },
-                    },
+                    SessionQueryAction::ResetSession => {
+                        match service.reset_session(&query.session_id).await {
+                            Ok(()) => SessionResponse {
+                                request_id: query.request_id,
+                                sessions: Vec::new(),
+                                total: 0,
+                                messages: Vec::new(),
+                                error: None,
+                            },
+                            Err(err) => SessionResponse {
+                                request_id: query.request_id,
+                                sessions: Vec::new(),
+                                total: 0,
+                                messages: Vec::new(),
+                                error: Some(err.to_string()),
+                            },
+                        }
+                    }
                 };
                 let _ = transport.send(BusMessage::SessionResponse(response)).await;
             }
@@ -563,6 +545,14 @@ mod tests {
         assert!(rb.enable_cron);
     }
 
+    #[test]
+    fn builder_with_plugin_manager_stores_registry() {
+        let cfg = GatewayConfig::default();
+        let pm = Arc::new(Mutex::new(PluginManager::new()));
+        let rb = RuntimeBuilder::new(cfg).with_plugin_manager(pm);
+        assert!(rb.plugin_manager.is_some());
+    }
+
     #[tokio::test]
     async fn run_without_enabled_subsystems_returns_ok() {
         let cfg = GatewayConfig::default();
@@ -570,5 +560,12 @@ mod tests {
         let res = rb.run().await;
         assert!(res.is_ok());
     }
-}
 
+    #[tokio::test]
+    async fn run_with_empty_plugin_manager_and_no_subsystems_returns_ok() {
+        let cfg = GatewayConfig::default();
+        let rb = RuntimeBuilder::new(cfg).with_plugin_manager(empty_plugin_manager());
+        let res = rb.run().await;
+        assert!(res.is_ok());
+    }
+}

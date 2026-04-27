@@ -15,13 +15,13 @@ members = [
     "crates/hermes-intelligence",
     "crates/hermes-acp",
     "crates/hermes-eval",
-    "crates/hermes-dashboard",
+    "crates/hermes-server",
     "crates/hermes-auth",
     "crates/hermes-telemetry",
     "crates/hermes-parity-tests",
     "crates/hermes-bus",
     "crates/hermes-runtime",
-    "apps/desktop/src-tauri",
+    "apps/client/src-tauri",
 ]
 
 [workspace.package]
@@ -45,7 +45,7 @@ hermes-config = { path = "crates/hermes-config" }
 hermes-intelligence = { path = "crates/hermes-intelligence" }
 hermes-acp = { path = "crates/hermes-acp" }
 hermes-eval = { path = "crates/hermes-eval" }
-hermes-dashboard = { path = "crates/hermes-dashboard" }
+hermes-server = { path = "crates/hermes-server" }
 hermes-auth = { path = "crates/hermes-auth" }
 hermes-telemetry = { path = "crates/hermes-telemetry" }
 hermes-parity-tests = { path = "crates/hermes-parity-tests" }

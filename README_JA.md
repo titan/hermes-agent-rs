@@ -91,7 +91,7 @@ hermes-cli                    # バイナリエントリポイント、TUI、ス
 ├── hermes-acp                # Agent Communication Protocol
 ├── hermes-skills             # スキル管理と Hub
 ├── hermes-cron               # Cron スケジューリング
-├── hermes-dashboard          # Web ダッシュボード + HTTP/WebSocket API サーバー
+├── hermes-server             # HTTP/WebSocket API サーバー
 ├── hermes-auth               # OAuth トークン交換
 ├── hermes-eval               # SWE-bench、Terminal-Bench、YC Bench
 └── hermes-telemetry          # OpenTelemetry + Prometheus

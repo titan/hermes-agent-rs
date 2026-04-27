@@ -19,6 +19,17 @@ cargo fmt --all --check                  # Format check
 cargo build -p hermes-eval --features agent-loop
 ```
 
+### Artifact 锁：`Blocking waiting for file lock on artifact directory`
+
+终端里 **`cargo run`** 与编辑器里的 **rust-analyzer**（`cargo check`）会争用同一 **`target/`** artifact 锁，表现为长时间阻塞。
+
+**仓库内缓解（已提交）：**
+
+1. **`.vscode/settings.json`**：`"rust-analyzer.cargo.targetDir": true` —— 让 rust-analyzer 使用 `target` 下**独立子目录**做检查，与命令行 `cargo build` / `cargo run` 分离（**改完后请重载窗口 / 重启 rust-analyzer**）。
+2. **`scripts/hermes`**：若已存在 `target/debug/hermes`，则**直接执行**该二进制，避免每次 `cargo run` 抢锁；需要强制走 cargo 时：`HERMES_USE_CARGO=1 ./scripts/hermes …`。首次可 `chmod +x scripts/hermes`，或始终 `sh scripts/hermes …`。
+
+若仍卡住：确认没有其它终端在长时间 `cargo build`，必要时结束残留 `cargo` 进程后再试。
+
 ---
 
 ## Project Structure
@@ -30,6 +41,7 @@ hermes-agent-rust/
 ├── PARITY_PLAN.md            # 8-week parity roadmap
 ├── Dockerfile                # Multi-stage release build
 ├── scripts/
+│   ├── hermes                # 优先 target/debug/hermes，减轻与 RA 的 artifact 锁竞争
 │   └── record_fixtures.py    # Fixture recording script
 └── crates/
     ├── hermes-core/          # Shared types, traits, error hierarchy
@@ -45,7 +57,7 @@ hermes-agent-rust/
     ├── hermes-mcp/           # Model Context Protocol client/server
     ├── hermes-acp/           # Agent Communication Protocol
     ├── hermes-eval/          # Evaluation framework (Runner, BenchmarkAdapter, Verifier)
-    ├── hermes-dashboard/     # Web dashboard + HTTP/WebSocket API server
+    ├── hermes-server/        # HTTP/WebSocket API server
     ├── hermes-auth/          # OAuth token exchange
     ├── hermes-telemetry/     # OpenTelemetry + Prometheus metrics
     └── hermes-parity-tests/  # Golden fixture tests for behavioral parity
@@ -65,7 +77,7 @@ hermes-cli (binary entry point)
 ├── hermes-tools (30 tool backends)
 ├── hermes-gateway (17 platform adapters)
 │   └── hermes-core
-├── hermes-dashboard (REST/WS server)
+├── hermes-server (REST/WS server)
 ├── hermes-cron (scheduling)
 ├── hermes-skills (skill management)
 ├── hermes-mcp (MCP client/server)
