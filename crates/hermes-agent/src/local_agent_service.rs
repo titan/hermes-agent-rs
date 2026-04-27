@@ -1,6 +1,6 @@
 //! Local in-process implementation of the `AgentService` trait.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -9,8 +9,9 @@ use hermes_core::traits::{AgentOverrides, AgentReply, AgentService};
 use hermes_core::{AgentError, LlmProvider, Message, StreamChunk};
 use hermes_tools::ToolRegistry;
 
-use crate::agent_builder::{build_agent_config, build_provider, bridge_tool_registry};
-use crate::agent_loop::AgentLoop;
+use crate::agent_builder::{bridge_tool_registry, build_agent_config, build_provider};
+use crate::agent_loop::{AgentConfig, AgentLoop};
+use crate::plugins::PluginManager;
 use crate::session_persistence::SessionPersistence;
 
 /// Local in-process agent service.
@@ -26,6 +27,8 @@ pub struct LocalAgentService {
     session_persistence: Arc<SessionPersistence>,
     /// Optional provider factory override, mainly for tests.
     provider_factory: Option<ProviderFactory>,
+    /// When set, [`AgentLoop`] receives [`PluginManager`] for in-process hooks.
+    plugin_manager: Option<Arc<Mutex<PluginManager>>>,
 }
 
 pub type ProviderFactory = Arc<dyn Fn(&GatewayConfig, &str) -> Arc<dyn LlmProvider> + Send + Sync>;
@@ -42,6 +45,25 @@ impl LocalAgentService {
             tool_registry,
             session_persistence,
             provider_factory: None,
+            plugin_manager: None,
+        }
+    }
+
+    /// Same as [`Self::new`] but attaches a [`PluginManager`] for lifecycle hooks
+    /// (`pre_tool_call`, …). Caller should merge plugin tools into
+    /// `tool_registry` first (e.g. [`crate::install_plugin_tools_into_registry`]).
+    pub fn new_with_plugin_manager(
+        config: Arc<GatewayConfig>,
+        tool_registry: Arc<ToolRegistry>,
+        session_persistence: Arc<SessionPersistence>,
+        plugin_manager: Arc<Mutex<PluginManager>>,
+    ) -> Self {
+        Self {
+            config,
+            tool_registry,
+            session_persistence,
+            provider_factory: None,
+            plugin_manager: Some(plugin_manager),
         }
     }
 
@@ -57,6 +79,7 @@ impl LocalAgentService {
             tool_registry,
             session_persistence,
             provider_factory: Some(provider_factory),
+            plugin_manager: None,
         }
     }
 
@@ -65,6 +88,19 @@ impl LocalAgentService {
             return factory(&self.config, effective_model);
         }
         build_provider(&self.config, effective_model)
+    }
+
+    fn spawn_agent_loop(
+        &self,
+        agent_config: AgentConfig,
+        agent_tool_registry: Arc<crate::agent_loop::ToolRegistry>,
+        provider: Arc<dyn LlmProvider>,
+    ) -> AgentLoop {
+        let mut agent = AgentLoop::new(agent_config, agent_tool_registry, provider);
+        if let Some(pm) = &self.plugin_manager {
+            agent = agent.with_plugins(pm.clone());
+        }
+        agent
     }
 }
 
@@ -110,23 +146,21 @@ impl AgentService for LocalAgentService {
         let agent_tool_registry = Arc::new(bridge_tool_registry(&self.tool_registry));
 
         // Create and run agent
-        let agent = AgentLoop::new(agent_config, agent_tool_registry, provider);
+        let agent = self.spawn_agent_loop(agent_config, agent_tool_registry, provider);
         let result = agent.run(messages.clone(), None).await?;
 
         // Update messages with agent response
         messages = result.messages;
 
         // Persist updated session
-        let _ = self
-            .session_persistence
-            .persist_session(
-                session_id,
-                &messages,
-                Some(&effective_model),
-                Some("local"),
-                None,
-                None,
-            );
+        let _ = self.session_persistence.persist_session(
+            session_id,
+            &messages,
+            Some(&effective_model),
+            Some("local"),
+            None,
+            None,
+        );
 
         // Extract the last assistant reply
         let reply_text = messages
@@ -188,7 +222,7 @@ impl AgentService for LocalAgentService {
         });
 
         // Create and run agent with streaming
-        let agent = AgentLoop::new(agent_config, agent_tool_registry, provider);
+        let agent = self.spawn_agent_loop(agent_config, agent_tool_registry, provider);
         let result = agent
             .run_stream(messages.clone(), None, Some(boxed_on_chunk))
             .await?;
@@ -197,16 +231,14 @@ impl AgentService for LocalAgentService {
         messages = result.messages;
 
         // Persist updated session
-        let _ = self
-            .session_persistence
-            .persist_session(
-                session_id,
-                &messages,
-                Some(&effective_model),
-                Some("local"),
-                None,
-                None,
-            );
+        let _ = self.session_persistence.persist_session(
+            session_id,
+            &messages,
+            Some(&effective_model),
+            Some("local"),
+            None,
+            None,
+        );
 
         // Extract the last assistant reply
         let reply_text = messages
@@ -222,31 +254,20 @@ impl AgentService for LocalAgentService {
         })
     }
 
-    async fn get_session_messages(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<Message>, AgentError> {
+    async fn get_session_messages(&self, session_id: &str) -> Result<Vec<Message>, AgentError> {
         self.session_persistence
             .load_session(session_id)
             .map_err(|e| AgentError::Io(e.to_string()))
     }
 
-    async fn reset_session(
-        &self,
-        session_id: &str,
-    ) -> Result<(), AgentError> {
+    async fn reset_session(&self, session_id: &str) -> Result<(), AgentError> {
         // First check if session exists
         let messages = self.session_persistence.load_session(session_id);
         if messages.is_ok() {
             // Delete session by persisting an empty session
-            let _ = self.session_persistence.persist_session(
-                session_id,
-                &[],
-                None,
-                None,
-                None,
-                None,
-            );
+            let _ =
+                self.session_persistence
+                    .persist_session(session_id, &[], None, None, None, None);
         }
         Ok(())
     }

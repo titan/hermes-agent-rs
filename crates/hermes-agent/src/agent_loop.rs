@@ -51,6 +51,9 @@ use crate::smart_model_routing::{
     ResolvedCheapRuntime, TurnRouteSignature,
 };
 pub use crate::smart_model_routing::{ApiMode, CheapModelRouteConfig, SmartModelRoutingConfig};
+use crate::steer::{
+    apply_pending_steer_to_last_tool_message, concat_pending, normalize_accepted_steer_text,
+};
 
 // ---------------------------------------------------------------------------
 // ToolRegistry
@@ -749,6 +752,8 @@ pub struct AgentLoop {
     /// tool calls are executed by the orchestrator (spawn/timeout/cancel/
     /// lineage) instead of simply returning a signal envelope.
     sub_agent_orchestrator: Option<Arc<crate::sub_agent_orchestrator::SubAgentOrchestrator>>,
+    /// Mid-run `/steer` buffer (Python `AIAgent._pending_steer`).
+    pending_steer: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -915,6 +920,7 @@ impl AgentLoop {
             evolution_counters: Arc::new(Mutex::new(EvolutionCounters::default())),
             oauth_refresh_backoff: Arc::new(Mutex::new(HashMap::new())),
             sub_agent_orchestrator: None,
+            pending_steer: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -938,6 +944,7 @@ impl AgentLoop {
             evolution_counters: Arc::new(Mutex::new(EvolutionCounters::default())),
             oauth_refresh_backoff: Arc::new(Mutex::new(HashMap::new())),
             sub_agent_orchestrator: None,
+            pending_steer: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -981,6 +988,64 @@ impl AgentLoop {
     pub fn with_delegate_depth(mut self, depth: u32) -> Self {
         self.delegate_depth = depth;
         self
+    }
+
+    /// Queue mid-run user guidance (Python `AIAgent.steer`).
+    ///
+    /// Returns `false` when the text is empty/whitespace-only.
+    pub fn steer(&self, text: &str) -> bool {
+        let Some(next) = normalize_accepted_steer_text(text) else {
+            return false;
+        };
+        if let Ok(mut guard) = self.pending_steer.lock() {
+            *guard = Some(concat_pending(guard.take(), next));
+            return true;
+        }
+        false
+    }
+
+    /// Clear any queued `/steer` guidance without applying it.
+    pub fn clear_pending_steer(&self) {
+        if let Ok(mut guard) = self.pending_steer.lock() {
+            *guard = None;
+        }
+    }
+
+    fn drain_pending_steer(&self) -> Option<String> {
+        if let Ok(mut guard) = self.pending_steer.lock() {
+            return guard.take();
+        }
+        None
+    }
+
+    fn restash_pending_steer(&self, text: String) {
+        if let Ok(mut guard) = self.pending_steer.lock() {
+            *guard = Some(text);
+        }
+    }
+
+    /// Pre-LLM-call drain: inject steer into the last tool result if possible; otherwise restash.
+    fn pre_api_apply_pending_steer(&self, ctx: &mut ContextManager) {
+        let Some(text) = self.drain_pending_steer() else {
+            return;
+        };
+        let msgs = ctx.get_messages_mut();
+        if apply_pending_steer_to_last_tool_message(msgs, &text) {
+            return;
+        }
+        self.restash_pending_steer(text);
+    }
+
+    /// Post-tool-call apply: inject steer into the last tool result if pending.
+    fn post_tool_apply_pending_steer(&self, ctx: &mut ContextManager) {
+        let Some(text) = self.drain_pending_steer() else {
+            return;
+        };
+        let msgs = ctx.get_messages_mut();
+        if apply_pending_steer_to_last_tool_message(msgs, &text) {
+            return;
+        }
+        self.restash_pending_steer(text);
     }
 
     // -- Plugin hook helpers ------------------------------------------------
@@ -2717,6 +2782,9 @@ impl AgentLoop {
                 ));
             }
 
+            // `/steer` pre-API drain — inject into last tool result before the next LLM call.
+            self.pre_api_apply_pending_steer(&mut ctx);
+
             if total_turns >= self.config.max_turns {
                 tracing::warn!(
                     "Max turns ({}) exceeded, requesting final summary",
@@ -3218,6 +3286,7 @@ impl AgentLoop {
             for result in results {
                 ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
             }
+            self.post_tool_apply_pending_steer(&mut ctx);
             if !tool_calls.is_empty()
                 && tool_calls
                     .iter()
@@ -3428,6 +3497,9 @@ impl AgentLoop {
                     persist_user_idx,
                 ));
             }
+
+            // `/steer` pre-API drain — inject into last tool result before the next LLM call.
+            self.pre_api_apply_pending_steer(&mut ctx);
 
             if total_turns >= self.config.max_turns {
                 tracing::warn!(
@@ -4032,6 +4104,7 @@ impl AgentLoop {
             for result in results {
                 ctx.add_message(Message::tool_result(&result.tool_call_id, &result.content));
             }
+            self.post_tool_apply_pending_steer(&mut ctx);
             if !tool_calls.is_empty()
                 && tool_calls
                     .iter()

@@ -133,6 +133,7 @@ pub fn provider_api_key_from_env(provider: &str) -> Option<String> {
         "openai" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
         "openrouter" => "OPENROUTER_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
         "qwen" => "DASHSCOPE_API_KEY",
         "kimi" | "moonshot" => "MOONSHOT_API_KEY",
         "minimax" => "MINIMAX_API_KEY",
@@ -152,6 +153,18 @@ pub fn provider_api_key_from_env(provider: &str) -> Option<String> {
 /// Falls back to [`StubProvider`] when no API key can be resolved.
 pub fn build_provider(config: &GatewayConfig, model: &str) -> Arc<dyn LlmProvider> {
     let (provider_name, model_name) = parse_model_string(model);
+
+    // AWS Bedrock / Converse + SigV4 is not implemented (Python v0.11.0 parity gap).
+    // Do not silently route to [`GenericProvider`] against an OpenAI-compatible URL.
+    if provider_name == "bedrock" {
+        tracing::warn!(
+            model = %model,
+            "build_provider: AWS Bedrock is not implemented in hermes-agent-rust; see deploy/PARITY_MODULE_C.md (C1)"
+        );
+        return Arc::new(BedrockUnsupportedProvider {
+            model: model.to_string(),
+        });
+    }
 
     let provider_config = config.llm_providers.get(provider_name);
 
@@ -236,10 +249,59 @@ pub fn build_provider(config: &GatewayConfig, model: &str) -> Arc<dyn LlmProvide
             .with_model(model_name);
             Arc::new(p)
         }
+        "deepseek" => {
+            let url = base_url.unwrap_or_else(|| "https://api.deepseek.com/v1".to_string());
+            Arc::new(GenericProvider::new(url, &api_key, model_name))
+        }
         _ => {
             let url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             Arc::new(GenericProvider::new(url, &api_key, model_name))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BedrockUnsupportedProvider — explicit parity gap (module C1)
+// ---------------------------------------------------------------------------
+
+/// Placeholder when the model string uses `bedrock:…` — Converse/SigV4 not wired.
+pub struct BedrockUnsupportedProvider {
+    pub model: String,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for BedrockUnsupportedProvider {
+    async fn chat_completion(
+        &self,
+        _messages: &[hermes_core::Message],
+        _tools: &[hermes_core::ToolSchema],
+        _max_tokens: Option<u32>,
+        _temperature: Option<f64>,
+        _model: Option<&str>,
+        _extra_body: Option<&Value>,
+    ) -> Result<hermes_core::LlmResponse, AgentError> {
+        Err(AgentError::LlmApi(format!(
+            "AWS Bedrock is not implemented in hermes-agent-rust (Python parity gap). \
+             Model '{}'. See deploy/PARITY_MODULE_C.md (C1).",
+            self.model
+        )))
+    }
+
+    fn chat_completion_stream(
+        &self,
+        _messages: &[hermes_core::Message],
+        _tools: &[hermes_core::ToolSchema],
+        _max_tokens: Option<u32>,
+        _temperature: Option<f64>,
+        _model: Option<&str>,
+        _extra_body: Option<&Value>,
+    ) -> futures::stream::BoxStream<'static, Result<hermes_core::StreamChunk, AgentError>> {
+        futures::stream::once(async move {
+            Err(AgentError::LlmApi(
+                "AWS Bedrock streaming is not implemented in hermes-agent-rust.".to_string(),
+            ))
+        })
+        .boxed()
     }
 }
 
@@ -287,5 +349,25 @@ impl LlmProvider for StubProvider {
             ))
         })
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod build_provider_tests {
+    use super::*;
+
+    #[test]
+    fn bedrock_provider_is_explicit_gap() {
+        let cfg = GatewayConfig::default();
+        let p = build_provider(&cfg, "bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(async { p.chat_completion(&[], &[], None, None, None, None).await })
+            .expect_err("bedrock should error");
+        let s = err.to_string();
+        assert!(
+            s.contains("Bedrock") || s.contains("bedrock"),
+            "unexpected: {s}"
+        );
     }
 }

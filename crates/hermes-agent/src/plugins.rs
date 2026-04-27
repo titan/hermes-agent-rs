@@ -6,6 +6,14 @@
 //! - Custom hooks (pre/post LLM call, tool call, API request, session lifecycle)
 //! - Additional LLM providers
 //! - CLI commands
+//!
+//! ## Tool dispatch (Python `dispatch_tool` parity)
+//!
+//! Hermes Python merges plugin tools into the model tool table before dispatch.
+//! After [`hermes_tools::register_builtin_tools`], call
+//! [`install_plugin_tools_into_registry`] so plugin [`ToolHandler`]s share the
+//! same [`hermes_tools::ToolRegistry`] as built-ins (same-name registrations
+//! overwrite with a warning, matching typical “last wins” plugin tables).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use hermes_core::{AgentError, ToolHandler, ToolSchema};
+use hermes_tools::ToolRegistry;
 
 // ---------------------------------------------------------------------------
 // HookType
@@ -487,6 +496,30 @@ impl PluginManager {
     }
 }
 
+/// Register every tool from [`PluginManager::all_tools`] into the shared
+/// [`ToolRegistry`] used by the agent runtime and MCP (Python merged tool table).
+///
+/// Call after [`hermes_tools::register_builtin_tools`] so plugins can override
+/// built-in names intentionally.
+pub fn install_plugin_tools_into_registry(registry: &ToolRegistry, pm: &PluginManager) {
+    for (schema, handler) in pm.all_tools() {
+        let name = schema.name.clone();
+        let desc = schema.description.clone();
+        registry.register(
+            name,
+            "plugin",
+            schema,
+            handler,
+            Arc::new(|| true),
+            vec![],
+            true,
+            desc,
+            "🔌",
+            None,
+        );
+    }
+}
+
 impl Default for PluginManager {
     fn default() -> Self {
         Self::new()
@@ -658,5 +691,58 @@ dependencies:
         // Deliberately invalid for PreApiRequest schema, but callback should still run.
         let _ = mgr.invoke_hook(HookType::PreApiRequest, &serde_json::json!({}));
         assert_eq!(*hit.lock().expect("counter lock"), 1);
+    }
+
+    #[tokio::test]
+    async fn install_plugin_tools_into_registry_registers_dispatch() {
+        use hermes_core::tool_schema::JsonSchema;
+
+        struct EchoTool;
+        #[async_trait::async_trait]
+        impl ToolHandler for EchoTool {
+            async fn execute(&self, params: Value) -> Result<String, hermes_core::ToolError> {
+                Ok(params.to_string())
+            }
+            fn schema(&self) -> ToolSchema {
+                ToolSchema::new(
+                    "echo_plugin_tool",
+                    "echo for test",
+                    JsonSchema::new("object"),
+                )
+            }
+        }
+
+        struct RegPlugin;
+        #[async_trait::async_trait]
+        impl Plugin for RegPlugin {
+            fn meta(&self) -> PluginMeta {
+                PluginMeta {
+                    name: "reg".into(),
+                    version: "0.0.1".into(),
+                    description: "t".into(),
+                    author: None,
+                }
+            }
+            async fn initialize(&self) -> Result<(), AgentError> {
+                Ok(())
+            }
+            async fn shutdown(&self) -> Result<(), AgentError> {
+                Ok(())
+            }
+            fn register(&self, ctx: &mut PluginContext) {
+                let h: Arc<dyn ToolHandler> = Arc::new(EchoTool);
+                let schema = h.schema();
+                ctx.register_tool(schema, h);
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        let mut pm = PluginManager::new();
+        pm.register(Arc::new(RegPlugin));
+        install_plugin_tools_into_registry(&registry, &pm);
+        let out = registry
+            .dispatch_async("echo_plugin_tool", serde_json::json!({ "a": 1 }))
+            .await;
+        assert!(out.contains('1'));
     }
 }

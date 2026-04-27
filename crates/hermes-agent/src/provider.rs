@@ -48,6 +48,82 @@ pub struct GenericProvider {
 }
 
 impl GenericProvider {
+    fn openrouter_tool_limit(extra_body: Option<&Value>) -> usize {
+        if let Some(limit) = extra_body
+            .and_then(|v| v.get("openrouter_max_tools"))
+            .and_then(|v| v.as_u64())
+        {
+            return limit as usize;
+        }
+        if let Ok(raw) = std::env::var("HERMES_OPENROUTER_MAX_TOOLS") {
+            if let Ok(parsed) = raw.parse::<usize>() {
+                return parsed;
+            }
+        }
+        24
+    }
+
+    fn tool_priority(name: &str) -> usize {
+        // Prefer filesystem/search primitives first when we must trim toolset size.
+        // These are the most common "remote mode" requests and preserve core utility.
+        if name.starts_with("read_")
+            || name.starts_with("write_")
+            || name.starts_with("list_")
+            || name.starts_with("glob")
+            || name.starts_with("search")
+            || name.starts_with("grep")
+            || name.contains("file")
+            || name.contains("dir")
+            || name.contains("path")
+        {
+            return 0;
+        }
+        if name.starts_with("exec") || name.contains("terminal") || name.contains("shell") {
+            return 1;
+        }
+        if name.starts_with("browser_") {
+            return 2;
+        }
+        3
+    }
+
+    fn normalize_tools_payload(&self, tools: &[ToolSchema], extra_body: Option<&Value>) -> Value {
+        let mut normalized: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect();
+
+        if self.base_url.contains("openrouter.ai") {
+            // OpenRouter may route to stricter downstream providers. Trim and prioritize
+            // high-signal tools to avoid provider-specific payload validation failures.
+            let mut ranked: Vec<(usize, Value)> = normalized
+                .into_iter()
+                .map(|v| {
+                    let name = v
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default();
+                    (Self::tool_priority(name), v)
+                })
+                .collect();
+            ranked.sort_by_key(|(priority, _)| *priority);
+            let limit = Self::openrouter_tool_limit(extra_body);
+            normalized = ranked.into_iter().take(limit).map(|(_, v)| v).collect();
+        }
+
+        Value::Array(normalized)
+    }
+
     /// Create a new generic provider.
     pub fn new(
         base_url: impl Into<String>,
@@ -242,17 +318,37 @@ impl GenericProvider {
     }
 
     fn sanitize_messages_for_strict_api(messages: &[Message], enabled: bool) -> Value {
-        if !enabled {
-            return serde_json::to_value(messages).unwrap_or_else(|_| serde_json::json!([]));
-        }
         let mut out = Vec::with_capacity(messages.len());
         for msg in messages {
             let mut api_msg = serde_json::to_value(msg).unwrap_or_else(|_| serde_json::json!({}));
             if let Some(tool_calls) = api_msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
-                for tc in tool_calls.iter_mut() {
-                    if let Some(obj) = tc.as_object_mut() {
+                let mut rebuilt_tool_calls: Vec<Value> = Vec::with_capacity(tool_calls.len());
+                for tc in tool_calls.iter() {
+                    if let Some(obj) = tc.as_object() {
                         let id = obj.get("id").cloned();
-                        let function = obj.get("function").cloned();
+                        let function = obj.get("function").cloned().or_else(|| {
+                            let name = obj.get("name").and_then(|v| v.as_str())?;
+                            let arguments = obj
+                                .get("arguments")
+                                .cloned()
+                                .map(|v| {
+                                    if let Some(s) = v.as_str() {
+                                        Value::String(s.to_string())
+                                    } else {
+                                        Value::String(v.to_string())
+                                    }
+                                })
+                                .unwrap_or_else(|| Value::String("{}".to_string()));
+                            Some(serde_json::json!({
+                                "name": name,
+                                "arguments": arguments,
+                            }))
+                        });
+                        // Defensive: drop malformed legacy tool_call items that cannot be
+                        // converted into OpenAI-compatible {"function": {...}} shape.
+                        if function.is_none() {
+                            continue;
+                        }
                         let mut stripped = serde_json::Map::new();
                         if let Some(v) = id {
                             stripped.insert("id".to_string(), v);
@@ -266,7 +362,31 @@ impl GenericProvider {
                         if let Some(v) = function {
                             stripped.insert("function".to_string(), v);
                         }
-                        *obj = stripped;
+                        if enabled {
+                            rebuilt_tool_calls.push(Value::Object(stripped));
+                        } else {
+                            // Always keep an OpenAI-compatible representation to avoid provider
+                            // deserialization errors when replaying tool call messages.
+                            let mut merged = obj.clone();
+                            if let Some(v) = stripped.get("function").cloned() {
+                                merged.insert("function".to_string(), v);
+                            }
+                            merged.insert(
+                                "type".to_string(),
+                                stripped
+                                    .get("type")
+                                    .cloned()
+                                    .unwrap_or_else(|| Value::String("function".to_string())),
+                            );
+                            rebuilt_tool_calls.push(Value::Object(merged));
+                        }
+                    }
+                }
+                if let Some(api_obj) = api_msg.as_object_mut() {
+                    if rebuilt_tool_calls.is_empty() {
+                        api_obj.remove("tool_calls");
+                    } else {
+                        api_obj.insert("tool_calls".to_string(), Value::Array(rebuilt_tool_calls));
                     }
                 }
             }
@@ -352,7 +472,7 @@ impl LlmProvider for GenericProvider {
             body["temperature"] = serde_json::json!(temp);
         }
         if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools);
+            body["tools"] = self.normalize_tools_payload(tools, extra_body);
         }
         if let Some(eb) = extra_body {
             if let Value::Object(map) = eb {
@@ -427,7 +547,7 @@ impl LlmProvider for GenericProvider {
                 body["temperature"] = serde_json::json!(temp);
             }
             if !tools.is_empty() {
-                body["tools"] = serde_json::json!(tools);
+                body["tools"] = provider.normalize_tools_payload(&tools, extra_body.as_ref());
             }
             if let Some(ref eb) = extra_body {
                 if let Value::Object(map) = eb {
@@ -1353,9 +1473,12 @@ impl OpenRouterProvider {
 
     /// Merge OpenRouter-specific parameters into extra_body.
     fn merge_extra_body(extra_body: Option<&Value>) -> Option<Value> {
-        // Pass through extra_body as-is; OpenRouter-specific fields like
-        // `transforms`, `provider`, `route` are already valid top-level keys
-        extra_body.cloned()
+        let mut merged = extra_body.cloned()?;
+        // Internal compatibility tuning flag; don't forward unknown key upstream.
+        if let Some(obj) = merged.as_object_mut() {
+            obj.remove("openrouter_max_tools");
+        }
+        Some(merged)
     }
 
     /// Parse an OpenRouter response, extracting reasoning_details if present.
@@ -1410,7 +1533,7 @@ impl LlmProvider for OpenRouterProvider {
             body["temperature"] = serde_json::json!(temp);
         }
         if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools);
+            body["tools"] = provider.normalize_tools_payload(tools, merged_extra.as_ref());
         }
         if let Some(ref eb) = merged_extra {
             if let Value::Object(map) = eb {
@@ -1425,6 +1548,7 @@ impl LlmProvider for OpenRouterProvider {
             if !order.is_empty() {
                 body["provider"] = serde_json::json!({
                     "order": order,
+                    "allow_fallbacks": false,
                 });
             }
         }
@@ -1477,7 +1601,10 @@ impl LlmProvider for OpenRouterProvider {
         let final_extra = if let Some(ref order) = self.provider_order {
             if !order.is_empty() {
                 let mut eb = merged_extra.unwrap_or_else(|| serde_json::json!({}));
-                eb["provider"] = serde_json::json!({"order": order});
+                eb["provider"] = serde_json::json!({
+                    "order": order,
+                    "allow_fallbacks": false,
+                });
                 Some(eb)
             } else {
                 merged_extra
@@ -1512,6 +1639,11 @@ fn parse_sse_chunk(json: &Value) -> Option<StreamChunk> {
         .get("content")
         .and_then(|c| c.as_str())
         .map(|s| s.to_string());
+    let reasoning = delta_obj
+        .get("reasoning_content")
+        .or_else(|| delta_obj.get("reasoning"))
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string());
 
     let tool_calls = delta_obj
         .get("tool_calls")
@@ -1540,11 +1672,11 @@ fn parse_sse_chunk(json: &Value) -> Option<StreamChunk> {
                 .collect::<Vec<_>>()
         });
 
-    let delta = if content.is_some() || tool_calls.is_some() {
+    let delta = if content.is_some() || tool_calls.is_some() || reasoning.is_some() {
         Some(StreamDelta {
             content,
             tool_calls,
-            extra: None,
+            extra: reasoning.map(|t| serde_json::json!({ "thinking": t })),
         })
     } else {
         None

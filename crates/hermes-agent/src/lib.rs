@@ -42,6 +42,7 @@ pub mod reasoning;
 pub mod session_persistence;
 pub mod skill_orchestrator;
 pub mod smart_model_routing;
+pub mod steer;
 pub mod sub_agent_orchestrator;
 pub mod subdirectory_hints;
 
@@ -87,7 +88,7 @@ pub use memory_manager::{
 };
 
 // Re-export plugin system
-pub use plugins::{Plugin, PluginManager, PluginMeta};
+pub use plugins::{install_plugin_tools_into_registry, Plugin, PluginManager, PluginMeta};
 
 // Re-export skill orchestrator
 pub use skill_orchestrator::SkillOrchestrator;

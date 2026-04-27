@@ -78,7 +78,14 @@ async fn get_session_messages_and_reset_session_round_trip() {
     let (session, service) = make_service();
     let messages = vec![Message::user("u"), Message::assistant("a")];
     session
-        .persist_session("s2", &messages, Some("openai:gpt-4o"), Some("test"), None, None)
+        .persist_session(
+            "s2",
+            &messages,
+            Some("openai:gpt-4o"),
+            Some("test"),
+            None,
+            None,
+        )
         .expect("persist");
 
     let loaded = service

@@ -119,6 +119,19 @@ impl ContextCompressor {
     /// not dominate the context budget.
     fn build_summary(messages: &[Message]) -> String {
         const MAX_SUMMARY_CHARS: usize = 2048;
+        fn safe_prefix(s: &str, max_bytes: usize) -> &str {
+            if max_bytes >= s.len() {
+                return s;
+            }
+            let mut last = 0usize;
+            for (idx, _) in s.char_indices() {
+                if idx > max_bytes {
+                    break;
+                }
+                last = idx;
+            }
+            &s[..last]
+        }
 
         let mut buf = String::from("[Conversation summary] Earlier conversation:\n");
 
@@ -143,7 +156,8 @@ impl ContextCompressor {
                 buf.push_str(&line);
             } else {
                 // Truncate this line to fit and stop — we've hit the cap.
-                buf.push_str(&line[..remaining.saturating_sub(1)]);
+                let prefix = safe_prefix(&line, remaining.saturating_sub(1));
+                buf.push_str(prefix);
                 buf.push('\n');
                 break;
             }

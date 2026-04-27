@@ -19,7 +19,7 @@ hermes-core = { workspace = true }
 hermes-agent = { workspace = true }
 hermes-tools = { workspace = true }
 hermes-config = { workspace = true }
-hermes-dashboard = { workspace = true }
+hermes-server = { workspace = true }
 hermes-gateway = { workspace = true, features = [
     "telegram",
     "discord",
