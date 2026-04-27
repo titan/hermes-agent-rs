@@ -45,8 +45,7 @@ fn provider_api_key_from_env_maps_known_provider() {
 #[test]
 fn bridge_tool_registry_keeps_schema_count() {
     let tools = ToolRegistry::new();
-    let terminal_backend: Arc<dyn hermes_core::TerminalBackend> =
-        Arc::new(LocalBackend::default());
+    let terminal_backend: Arc<dyn hermes_core::TerminalBackend> = Arc::new(LocalBackend::default());
     let skill_store = Arc::new(hermes_skills::FileSkillStore::new(
         hermes_skills::FileSkillStore::default_dir(),
     ));
@@ -57,7 +56,10 @@ fn bridge_tool_registry_keeps_schema_count() {
     let defs = tools.get_definitions();
     let bridged = bridge_tool_registry(&tools);
     let bridged_names = bridged.names();
-    assert!(!defs.is_empty(), "builtin tool definitions should be present");
+    assert!(
+        !defs.is_empty(),
+        "builtin tool definitions should be present"
+    );
     assert_eq!(
         bridged_names.len(),
         defs.len(),
