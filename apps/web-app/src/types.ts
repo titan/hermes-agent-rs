@@ -6,12 +6,23 @@ export interface ChatMessage {
   model?: string;
   execution_backend?: "local" | "sandbox";
   tool_calls?: ToolCall[];
+  execution_timeline?: ExecutionTimelineEvent[];
 }
 
 export interface ToolCall {
   name: string;
   status: "running" | "done" | "error";
   output?: string;
+}
+
+export interface ExecutionTimelineEvent {
+  type: "tool_start" | "tool_stdout" | "tool_complete" | "status";
+  tool?: string;
+  content?: string;
+  arguments?: string;
+  chunk_index?: number;
+  chunk_total?: number;
+  created_at: string;
 }
 
 export interface Session {

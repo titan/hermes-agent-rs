@@ -5,6 +5,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Copy, Check } from "lucide-react";
 import { useState } from "react";
 import type { ChatMessage } from "../types";
+import { ExecutionTimeline } from "./ExecutionTimeline";
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -62,8 +63,14 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           </div>
         )}
 
-        {/* Tool calls */}
-        {message.tool_calls && message.tool_calls.length > 0 && (
+        {message.execution_timeline && message.execution_timeline.length > 0 && (
+          <ExecutionTimeline events={message.execution_timeline} />
+        )}
+
+        {/* Tool calls (fallback) */}
+        {(!message.execution_timeline || message.execution_timeline.length === 0) &&
+          message.tool_calls &&
+          message.tool_calls.length > 0 && (
           <div className="mt-2 space-y-1">
             {message.tool_calls.map((tc, i) => (
               <div
@@ -81,6 +88,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 />
                 <span className="font-mono">{tc.name}</span>
                 <span>— {tc.status}</span>
+                {tc.output ? <span className="truncate max-w-[420px]">{tc.output}</span> : null}
               </div>
             ))}
           </div>

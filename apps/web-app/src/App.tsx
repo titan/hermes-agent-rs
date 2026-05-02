@@ -13,6 +13,11 @@ import type { Session, Project, NavPage, ChatMessage } from "./types";
 export default function App() {
   const SIDEBAR_WIDTH_KEY = "hermes.ui.sidebar.width.v1";
   const CLOUD_AGENT_MAP_KEY = "hermes.ui.cloud_agent_by_session.v1";
+  const CLOUD_AGENT_MODEL = String(import.meta.env.VITE_CLOUD_AGENT_MODEL ?? "").trim() || undefined;
+  const CLOUD_AGENT_EXECUTION_PROFILE = (
+    String(import.meta.env.VITE_CLOUD_AGENT_EXECUTION_PROFILE ?? "").trim().toLowerCase() ||
+    "tool_use_strong"
+  ) as "tool_use_strong" | "balanced" | "cheap_fast";
   const SIDEBAR_MIN_WIDTH = 200;
   const SIDEBAR_MAX_WIDTH = 360;
   const [page, setPage] = useState<NavPage>("chat");
@@ -205,11 +210,13 @@ export default function App() {
                     client_session_id: sessionId,
                     workspace_mode: "repo",
                     mode: "on_demand",
+                    execution_profile: CLOUD_AGENT_EXECUTION_PROFILE,
                   }
                 : {
                     client_session_id: sessionId,
                     workspace_mode: "blank",
                     mode: "on_demand",
+                    execution_profile: CLOUD_AGENT_EXECUTION_PROFILE,
                   }
             );
             cloudAgentId = created.id;
@@ -241,7 +248,12 @@ export default function App() {
             )
           );
 
-          await api.sendCloudAgentMessageStream(cloudAgentId, { text: cloudPrompt }, {
+          await api.sendCloudAgentMessageStream(
+            cloudAgentId,
+            CLOUD_AGENT_MODEL
+              ? { text: cloudPrompt, model: CLOUD_AGENT_MODEL }
+              : { text: cloudPrompt, execution_profile: CLOUD_AGENT_EXECUTION_PROFILE },
+            {
             onChunk: (piece) => {
               setSessions((prev) =>
                 prev.map((s) =>
@@ -257,7 +269,169 @@ export default function App() {
                 )
               );
             },
-          });
+            onToolCall: (tool) => {
+              const toolName = tool.name?.trim() || "tool";
+              const ts = new Date().toISOString();
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === sessionId
+                    ? {
+                        ...s,
+                        messages: s.messages.map((m) => {
+                          if (m.id !== streamingId) return m;
+                          const current = m.tool_calls ?? [];
+                          if (current.some((tc) => tc.name === toolName && tc.status !== "error")) {
+                            return m;
+                          }
+                          return {
+                            ...m,
+                            tool_calls: [...current, { name: toolName, status: "running", output: tool.arguments }],
+                            execution_timeline: [
+                              ...(m.execution_timeline ?? []),
+                              {
+                                type: "tool_start",
+                                tool: toolName,
+                                arguments: tool.arguments,
+                                created_at: ts,
+                              },
+                            ],
+                          };
+                        }),
+                        updated_at: new Date().toISOString(),
+                      }
+                    : s
+                )
+              );
+            },
+            onToolStart: (tool, content, args) => {
+              const ts = new Date().toISOString();
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === sessionId
+                    ? {
+                        ...s,
+                        messages: s.messages.map((m) =>
+                          m.id === streamingId
+                            ? {
+                                ...m,
+                                tool_calls: [
+                                  ...(m.tool_calls ?? []),
+                                  { name: tool, status: "running", output: content || undefined },
+                                ],
+                                execution_timeline: [
+                                  ...(m.execution_timeline ?? []),
+                                  {
+                                    type: "tool_start",
+                                    tool,
+                                    arguments: args,
+                                    content: content || undefined,
+                                    created_at: ts,
+                                  },
+                                ],
+                              }
+                            : m
+                        ),
+                      }
+                    : s
+                )
+              );
+            },
+            onToolStdout: (tool, content, chunkIndex, chunkTotal) => {
+              const ts = new Date().toISOString();
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === sessionId
+                    ? {
+                        ...s,
+                        messages: s.messages.map((m) =>
+                          m.id === streamingId
+                            ? {
+                                ...m,
+                                execution_timeline: [
+                                  ...(m.execution_timeline ?? []),
+                                  {
+                                    type: "tool_stdout",
+                                    tool,
+                                    content: content || undefined,
+                                    chunk_index: chunkIndex,
+                                    chunk_total: chunkTotal,
+                                    created_at: ts,
+                                  },
+                                ],
+                              }
+                            : m
+                        ),
+                      }
+                    : s
+                )
+              );
+            },
+            onToolComplete: (tool, content) => {
+              const ts = new Date().toISOString();
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === sessionId
+                    ? {
+                        ...s,
+                        messages: s.messages.map((m) =>
+                          m.id === streamingId
+                            ? {
+                                ...m,
+                                tool_calls: (m.tool_calls ?? []).map((tc) =>
+                                  tc.name === tool ? { ...tc, status: "done", output: content || tc.output } : tc
+                                ),
+                                execution_timeline: [
+                                  ...(m.execution_timeline ?? []),
+                                  {
+                                    type: "tool_complete",
+                                    tool,
+                                    content: content || undefined,
+                                    created_at: ts,
+                                  },
+                                ],
+                              }
+                            : m
+                        ),
+                      }
+                    : s
+                )
+              );
+            },
+            onStatus: (content, kind) => {
+              if (!content) return;
+              const ts = new Date().toISOString();
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === sessionId
+                    ? {
+                        ...s,
+                        messages: s.messages.map((m) =>
+                          m.id === streamingId
+                            ? {
+                                ...m,
+                                tool_calls: [
+                                  ...(m.tool_calls ?? []),
+                                  { name: "status", status: "running", output: content },
+                                ],
+                                execution_timeline: [
+                                  ...(m.execution_timeline ?? []),
+                                  {
+                                    type: "status",
+                                    tool: kind || "status",
+                                    content,
+                                    created_at: ts,
+                                  },
+                                ],
+                              }
+                            : m
+                        ),
+                      }
+                    : s
+                )
+              );
+            },
+            }
+          );
 
           setSessions((prev) =>
             prev.map((s) =>
@@ -317,7 +491,18 @@ export default function App() {
         resetStream();
       }
     },
-    [activeSessionId, cloudAgentBySession, enforceSandboxExecution, extractGithubRepoUrl, projects, resetStream, sendStreaming, shouldUseSandboxAutoRoute]
+    [
+      activeSessionId,
+      cloudAgentBySession,
+      enforceSandboxExecution,
+      extractGithubRepoUrl,
+      projects,
+      resetStream,
+      sendStreaming,
+      shouldUseSandboxAutoRoute,
+      CLOUD_AGENT_MODEL,
+      CLOUD_AGENT_EXECUTION_PROFILE,
+    ]
   );
 
   const handleAddProject = useCallback(async (name: string, path: string) => {

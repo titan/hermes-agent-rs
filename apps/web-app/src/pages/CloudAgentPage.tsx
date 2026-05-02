@@ -25,6 +25,7 @@ import {
   type CloudAgentMessageRecord,
   type CloudAgentSession,
 } from "../api";
+import { ExecutionTimeline } from "../components/ExecutionTimeline";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -99,6 +100,11 @@ const TEMPLATES = [
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function CloudAgentPage() {
+  const CLOUD_AGENT_MODEL = String(import.meta.env.VITE_CLOUD_AGENT_MODEL ?? "").trim() || undefined;
+  const CLOUD_AGENT_EXECUTION_PROFILE = (
+    String(import.meta.env.VITE_CLOUD_AGENT_EXECUTION_PROFILE ?? "").trim().toLowerCase() ||
+    "tool_use_strong"
+  ) as "tool_use_strong" | "balanced" | "cheap_fast";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -200,6 +206,7 @@ export default function CloudAgentPage() {
           const created = await createCloudAgent({
             workspace_mode: "blank",
             mode: "on_demand",
+            execution_profile: CLOUD_AGENT_EXECUTION_PROFILE,
           });
           await refreshSessions();
           sid = created.id;
@@ -232,15 +239,148 @@ export default function CloudAgentPage() {
           },
         ]);
 
-        await sendCloudAgentMessageStream(sid!, { text: msg }, {
+        await sendCloudAgentMessageStream(
+          sid!,
+          CLOUD_AGENT_MODEL
+            ? { text: msg, model: CLOUD_AGENT_MODEL }
+            : { text: msg, execution_profile: CLOUD_AGENT_EXECUTION_PROFILE },
+          {
           onChunk: (piece) => {
             setMessages((prev) =>
               prev.map((m) => (m.id === replyId ? { ...m, content: `${m.content}${piece}` } : m))
             );
           },
+          onToolCall: (tool) => {
+            const toolName = tool.name?.trim() || "tool";
+            const ts = new Date().toISOString();
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === replyId
+                  ? {
+                      ...m,
+                      tool_calls: (m.tool_calls ?? []).some((tc) => tc.name === toolName && tc.status !== "error")
+                        ? m.tool_calls
+                        : [...(m.tool_calls ?? []), { name: toolName, status: "running", output: tool.arguments }],
+                      execution_timeline: [
+                        ...(m.execution_timeline ?? []),
+                        {
+                          type: "tool_start",
+                          tool: toolName,
+                          arguments: tool.arguments,
+                          created_at: ts,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
+          },
+          onToolStart: (tool, content, args) => {
+            const ts = new Date().toISOString();
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === replyId
+                  ? {
+                      ...m,
+                      tool_calls: [...(m.tool_calls ?? []), { name: tool, status: "running", output: content || undefined }],
+                      execution_timeline: [
+                        ...(m.execution_timeline ?? []),
+                        {
+                          type: "tool_start",
+                          tool,
+                          arguments: args,
+                          content: content || undefined,
+                          created_at: ts,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
+          },
+          onToolStdout: (tool, content, chunkIndex, chunkTotal) => {
+            const ts = new Date().toISOString();
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === replyId
+                  ? {
+                      ...m,
+                      execution_timeline: [
+                        ...(m.execution_timeline ?? []),
+                        {
+                          type: "tool_stdout",
+                          tool,
+                          content: content || undefined,
+                          chunk_index: chunkIndex,
+                          chunk_total: chunkTotal,
+                          created_at: ts,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
+          },
+          onToolComplete: (tool, content) => {
+            const ts = new Date().toISOString();
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === replyId
+                  ? {
+                      ...m,
+                      tool_calls: (m.tool_calls ?? []).map((tc) =>
+                        tc.name === tool ? { ...tc, status: "done", output: content || tc.output } : tc
+                      ),
+                      execution_timeline: [
+                        ...(m.execution_timeline ?? []),
+                        {
+                          type: "tool_complete",
+                          tool,
+                          content: content || undefined,
+                          created_at: ts,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
+          },
+          onStatus: (content, kind) => {
+            if (!content) return;
+            const ts = new Date().toISOString();
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === replyId
+                  ? {
+                      ...m,
+                      tool_calls: [...(m.tool_calls ?? []), { name: "status", status: "running", output: content }],
+                      execution_timeline: [
+                        ...(m.execution_timeline ?? []),
+                        {
+                          type: "status",
+                          tool: kind || "status",
+                          content,
+                          created_at: ts,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
+          },
           onDone: () => {
             setMessages((prev) =>
-              prev.map((m) => (m.id === replyId ? { ...m, status: "done" } : m))
+              prev.map((m) =>
+                m.id === replyId
+                  ? {
+                      ...m,
+                      status: "done",
+                      tool_calls: (m.tool_calls ?? []).map((tc) =>
+                        tc.status === "running" ? { ...tc, status: "done" } : tc
+                      ),
+                    }
+                  : m
+              )
             );
           },
           onError: (err) => {
@@ -248,14 +388,15 @@ export default function CloudAgentPage() {
               prev.map((m) => (m.id === replyId ? { ...m, status: "error", content: err } : m))
             );
           },
-        });
+          }
+        );
       } catch (e) {
         setError(String(e));
       } finally {
         setSending(false);
       }
     },
-    [input, selectedId, refreshSessions],
+    [input, selectedId, refreshSessions, CLOUD_AGENT_MODEL, CLOUD_AGENT_EXECUTION_PROFILE],
   );
 
   const handleDelete = useCallback(
@@ -394,14 +535,44 @@ export default function CloudAgentPage() {
                   )}
                   {messages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                      <div
-                        className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                          msg.role === "user"
-                            ? "bg-blue-600 text-white"
-                            : "bg-white/[0.05] text-gray-200 border border-white/[0.06]"
-                        }`}
-                      >
-                        <div className="whitespace-pre-wrap">{msg.content}</div>
+                      <div className="max-w-[75%]">
+                        <div
+                          className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                            msg.role === "user"
+                              ? "bg-blue-600 text-white"
+                              : "bg-white/[0.05] text-gray-200 border border-white/[0.06]"
+                          }`}
+                        >
+                          <div className="whitespace-pre-wrap">{msg.content}</div>
+                        </div>
+                        {msg.role !== "user" && msg.execution_timeline && msg.execution_timeline.length > 0 && (
+                          <ExecutionTimeline events={msg.execution_timeline} />
+                        )}
+                        {msg.role !== "user" &&
+                          (!msg.execution_timeline || msg.execution_timeline.length === 0) &&
+                          msg.tool_calls &&
+                          msg.tool_calls.length > 0 && (
+                            <div className="mt-2 rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2">
+                              <div className="text-[11px] text-gray-400 mb-1">执行记录</div>
+                              <div className="space-y-1.5">
+                                {msg.tool_calls.map((tc, i) => (
+                                  <div key={`${tc.name}-${i}`} className="text-xs text-gray-300">
+                                    <span
+                                      className={`inline-block w-1.5 h-1.5 rounded-full mr-2 ${
+                                        tc.status === "done"
+                                          ? "bg-emerald-400"
+                                          : tc.status === "error"
+                                            ? "bg-red-400"
+                                            : "bg-amber-400 animate-pulse"
+                                      }`}
+                                    />
+                                    <span className="font-mono">{tc.name}</span>
+                                    <span className="ml-2 text-gray-500">{tc.status}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                       </div>
                     </div>
                   ))}

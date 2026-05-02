@@ -387,6 +387,16 @@ export interface CloudAgentMessageRecord {
   content: string;
   status: string;
   created_at: string;
+  tool_calls?: Array<{ name: string; status: "running" | "done" | "error"; output?: string }>;
+  execution_timeline?: Array<{
+    type: "tool_start" | "tool_stdout" | "tool_complete" | "status";
+    tool?: string;
+    content?: string;
+    arguments?: string;
+    chunk_index?: number;
+    chunk_total?: number;
+    created_at: string;
+  }>;
 }
 
 export interface CloudAgentCommitRecord {
@@ -440,6 +450,7 @@ export const createCloudAgent = (payload: {
   workspace_mode?: "repo" | "blank";
   sandbox_backend?: "docker" | "cloudflare" | "modal" | "runloop" | "fly";
   model?: string;
+  execution_profile?: "tool_use_strong" | "balanced" | "cheap_fast";
   startup_commands?: string[];
   mode?: "on_demand" | "persistent";
   idempotency_key?: string;
@@ -467,7 +478,11 @@ export const getCloudAgentMessages = (id: string) =>
 
 export const sendCloudAgentMessage = (
   id: string,
-  payload: { text: string; model?: string },
+  payload: {
+    text: string;
+    model?: string;
+    execution_profile?: "tool_use_strong" | "balanced" | "cheap_fast";
+  },
 ) =>
   fetchJSON<{ session_id: string; reply: string }>(
     `/api/v1/agents/${encodeURIComponent(id)}/messages`,
@@ -480,9 +495,18 @@ export const sendCloudAgentMessage = (
 
 export const sendCloudAgentMessageStream = (
   id: string,
-  payload: { text: string; model?: string },
+  payload: {
+    text: string;
+    model?: string;
+    execution_profile?: "tool_use_strong" | "balanced" | "cheap_fast";
+  },
   handlers: {
     onChunk?: (text: string) => void;
+    onToolCall?: (tool: { id?: string; name?: string; arguments?: string }) => void;
+    onToolStart?: (tool: string, content?: string, args?: string) => void;
+    onToolStdout?: (tool: string, content?: string, chunkIndex?: number, chunkTotal?: number) => void;
+    onToolComplete?: (tool: string, content?: string) => void;
+    onStatus?: (content: string, kind?: string) => void;
     onDone?: (fullText: string) => void;
     onError?: (error: string) => void;
   } = {},
@@ -538,6 +562,44 @@ export const sendCloudAgentMessageStream = (
             full += piece;
             handlers.onChunk?.(piece);
           }
+          const toolCalls = data?.chunk?.delta?.tool_calls;
+          if (Array.isArray(toolCalls)) {
+            for (const tc of toolCalls) {
+              handlers.onToolCall?.({
+                id: tc?.id,
+                name: tc?.function?.name,
+                arguments: tc?.function?.arguments,
+              });
+            }
+          }
+          return;
+        }
+        if (data?.type === "tool_start") {
+          const args = data?.arguments;
+          handlers.onToolStart?.(
+            String(data?.tool ?? "tool"),
+            String(data?.content ?? ""),
+            typeof args === "string" ? args : JSON.stringify(args ?? {})
+          );
+          return;
+        }
+        if (data?.type === "tool_stdout") {
+          const chunkIndex = Number(data?.chunk_index);
+          const chunkTotal = Number(data?.chunk_total);
+          handlers.onToolStdout?.(
+            String(data?.tool ?? "tool"),
+            String(data?.content ?? ""),
+            Number.isFinite(chunkIndex) ? chunkIndex : undefined,
+            Number.isFinite(chunkTotal) ? chunkTotal : undefined
+          );
+          return;
+        }
+        if (data?.type === "tool_complete") {
+          handlers.onToolComplete?.(String(data?.tool ?? "tool"), String(data?.content ?? ""));
+          return;
+        }
+        if (data?.type === "status") {
+          handlers.onStatus?.(String(data?.content ?? ""), String(data?.kind ?? "lifecycle"));
           return;
         }
         if (data?.type === "done") {
