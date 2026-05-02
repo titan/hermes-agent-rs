@@ -202,10 +202,12 @@ export default function App() {
               repoUrl
                 ? {
                     repo_url: repoUrl,
+                    client_session_id: sessionId,
                     workspace_mode: "repo",
                     mode: "on_demand",
                   }
                 : {
+                    client_session_id: sessionId,
                     workspace_mode: "blank",
                     mode: "on_demand",
                   }

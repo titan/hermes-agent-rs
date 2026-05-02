@@ -366,6 +366,7 @@ export interface CloudAgentSession {
   id: string;
   tenant_id: string;
   user_id: string;
+  client_session_id?: string;
   sandbox_id: string;
   repo_url: string;
   branch: string;
@@ -434,6 +435,7 @@ export const getCloudAgents = () =>
 
 export const createCloudAgent = (payload: {
   repo_url?: string;
+  client_session_id?: string;
   branch?: string;
   workspace_mode?: "repo" | "blank";
   sandbox_backend?: "docker" | "cloudflare" | "modal" | "runloop" | "fly";
