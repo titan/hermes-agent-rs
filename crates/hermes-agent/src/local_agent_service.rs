@@ -6,11 +6,11 @@ use async_trait::async_trait;
 
 use hermes_config::GatewayConfig;
 use hermes_core::traits::{AgentOverrides, AgentReply, AgentService};
-use hermes_core::{AgentError, LlmProvider, Message, StreamChunk};
+use hermes_core::{AgentError, LlmProvider, Message, StreamChunk, StreamDelta};
 use hermes_tools::ToolRegistry;
 
 use crate::agent_builder::{bridge_tool_registry, build_agent_config, build_provider};
-use crate::agent_loop::{AgentConfig, AgentLoop};
+use crate::agent_loop::{AgentCallbacks, AgentConfig, AgentLoop};
 use crate::plugins::PluginManager;
 use crate::session_persistence::SessionPersistence;
 
@@ -34,6 +34,16 @@ pub struct LocalAgentService {
 pub type ProviderFactory = Arc<dyn Fn(&GatewayConfig, &str) -> Arc<dyn LlmProvider> + Send + Sync>;
 
 impl LocalAgentService {
+    fn fallback_model(&self) -> String {
+        if self.config.llm_providers.contains_key("openrouter") {
+            return "openrouter:deepseek/deepseek-chat-v3-0324".to_string();
+        }
+        if self.config.llm_providers.contains_key("anthropic") {
+            return "claude-3-5-sonnet-latest".to_string();
+        }
+        "gpt-4o".to_string()
+    }
+
     /// Create a new `LocalAgentService`.
     pub fn new(
         config: Arc<GatewayConfig>,
@@ -126,7 +136,7 @@ impl AgentService for LocalAgentService {
             .model
             .clone()
             .or_else(|| self.config.model.clone())
-            .unwrap_or_else(|| "gpt-4o".to_string());
+            .unwrap_or_else(|| self.fallback_model());
 
         let effective_personality = overrides
             .personality
@@ -197,7 +207,7 @@ impl AgentService for LocalAgentService {
             .model
             .clone()
             .or_else(|| self.config.model.clone())
-            .unwrap_or_else(|| "gpt-4o".to_string());
+            .unwrap_or_else(|| self.fallback_model());
 
         let effective_personality = overrides
             .personality
@@ -217,12 +227,90 @@ impl AgentService for LocalAgentService {
         let agent_tool_registry = Arc::new(bridge_tool_registry(&self.tool_registry));
 
         // Convert Arc to Box for AgentLoop
+        let stream_forwarder = on_chunk.clone();
         let boxed_on_chunk: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
-            on_chunk(chunk);
+            stream_forwarder(chunk);
         });
 
+        let tool_start_forwarder = on_chunk.clone();
+        let tool_complete_forwarder = on_chunk.clone();
+        let status_forwarder = on_chunk.clone();
+        let callbacks = AgentCallbacks {
+            on_tool_start: Some(Box::new(move |tool_name, args| {
+                tool_start_forwarder(StreamChunk {
+                    delta: Some(StreamDelta {
+                        content: None,
+                        tool_calls: None,
+                        extra: Some(serde_json::json!({
+                            "event": "tool_start",
+                            "tool": tool_name,
+                            "arguments": args,
+                        })),
+                    }),
+                    finish_reason: None,
+                    usage: None,
+                });
+            })),
+            on_tool_complete: Some(Box::new(move |tool_name, output| {
+                if !output.is_empty() {
+                    const STDOUT_CHUNK_SIZE: usize = 2000;
+                    let chars: Vec<char> = output.chars().collect();
+                    let total_chunks = chars.len().div_ceil(STDOUT_CHUNK_SIZE).max(1);
+                    for (idx, chunk) in chars.chunks(STDOUT_CHUNK_SIZE).enumerate() {
+                        let part: String = chunk.iter().collect();
+                        tool_complete_forwarder(StreamChunk {
+                            delta: Some(StreamDelta {
+                                content: None,
+                                tool_calls: None,
+                                extra: Some(serde_json::json!({
+                                    "event": "tool_stdout",
+                                    "tool": tool_name,
+                                    "content": part,
+                                    "chunk_index": idx + 1,
+                                    "chunk_total": total_chunks,
+                                })),
+                            }),
+                            finish_reason: None,
+                            usage: None,
+                        });
+                    }
+                }
+                tool_complete_forwarder(StreamChunk {
+                    delta: Some(StreamDelta {
+                        content: None,
+                        tool_calls: None,
+                        extra: Some(serde_json::json!({
+                            "event": "tool_complete",
+                            "tool": tool_name,
+                            "content": output,
+                        })),
+                    }),
+                    finish_reason: None,
+                    usage: None,
+                });
+            })),
+            status_callback: Some(Arc::new(move |kind, message| {
+                status_forwarder(StreamChunk {
+                    delta: Some(StreamDelta {
+                        content: None,
+                        tool_calls: None,
+                        extra: Some(serde_json::json!({
+                            "event": "status",
+                            "kind": kind,
+                            "content": message,
+                        })),
+                    }),
+                    finish_reason: None,
+                    usage: None,
+                });
+            })),
+            ..Default::default()
+        };
+
         // Create and run agent with streaming
-        let agent = self.spawn_agent_loop(agent_config, agent_tool_registry, provider);
+        let agent = self
+            .spawn_agent_loop(agent_config, agent_tool_registry, provider)
+            .with_callbacks(callbacks);
         let result = agent
             .run_stream(messages.clone(), None, Some(boxed_on_chunk))
             .await?;
