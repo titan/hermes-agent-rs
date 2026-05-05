@@ -19,7 +19,7 @@ use hermes_cli::app::provider_api_key_from_env;
 use hermes_cli::cli::{Cli, CliCommand};
 use hermes_cli::App;
 use hermes_config::{
-    apply_user_config_patch, extra_string, gateway_pid_path_in, hermes_home, load_config,
+    apply_user_config_patch, gateway_pid_path_in, hermes_home, load_config,
     load_user_config_file, platform_token_or_extra, save_config_yaml, state_dir,
     user_config_field_display, validate_config, ConfigError, PlatformConfig,
 };
@@ -168,6 +168,15 @@ async fn main() {
             no_gateway,
             no_cron,
         } => run_serve(cli, action, host, port, no_gateway, no_cron).await,
+        CliCommand::Cloud {
+            action,
+            agent_id,
+            prompt,
+            env,
+            attempts,
+            limit,
+            json,
+        } => run_cloud(action, agent_id, prompt, env, attempts, limit, json).await,
         CliCommand::Completion { shell } => run_completion(shell),
         CliCommand::Uninstall { yes } => run_uninstall(yes).await,
     };
@@ -1062,8 +1071,8 @@ async fn register_gateway_adapters(
 
         if let Some(qqbot) = config.platforms.get("qqbot") {
             let ready = qqbot.enabled
-                && extra_string(qqbot, "app_id").is_some()
-                && extra_string(qqbot, "client_secret").is_some();
+                && hermes_config::extra_string(qqbot, "app_id").is_some()
+                && hermes_config::extra_string(qqbot, "client_secret").is_some();
             if ready && !summary.registered.iter().any(|n| n == "qqbot") {
                 gateway
                     .register_adapter("qqbot", Arc::new(NoopAdapter { name: "qqbot" }))
@@ -1073,11 +1082,11 @@ async fn register_gateway_adapters(
 
         if let Some(wecom_cb) = config.platforms.get("wecom_callback") {
             let ready = wecom_cb.enabled
-                && extra_string(wecom_cb, "corp_id").is_some()
-                && extra_string(wecom_cb, "corp_secret").is_some()
-                && extra_string(wecom_cb, "agent_id").is_some()
+                && hermes_config::extra_string(wecom_cb, "corp_id").is_some()
+                && hermes_config::extra_string(wecom_cb, "corp_secret").is_some()
+                && hermes_config::extra_string(wecom_cb, "agent_id").is_some()
                 && platform_token_or_extra(wecom_cb).is_some()
-                && extra_string(wecom_cb, "encoding_aes_key").is_some();
+                && hermes_config::extra_string(wecom_cb, "encoding_aes_key").is_some();
             if ready && !summary.registered.iter().any(|n| n == "wecom_callback") {
                 gateway
                     .register_adapter(
@@ -2190,6 +2199,241 @@ async fn run_serve(
             );
             Ok(())
         }
+    }
+}
+
+async fn run_cloud(
+    action: Option<String>,
+    agent_id: Option<String>,
+    prompt: Option<String>,
+    env: Option<String>,
+    attempts: Option<u8>,
+    limit: u32,
+    json: bool,
+) -> Result<(), AgentError> {
+    let action = action.unwrap_or_else(|| "list".to_string());
+    let base_url = std::env::var("HERMES_CLOUD_API_URL")
+        .or_else(|_| std::env::var("HERMES_CLOUD_BASE_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8787".to_string());
+    let token = std::env::var("HERMES_CLOUD_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("HERMES_AUTH_TOKEN").ok());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .map_err(|e| AgentError::Io(format!("failed to initialize cloud HTTP client: {}", e)))?;
+
+    let with_auth = |req: reqwest::RequestBuilder| {
+        if let Some(t) = token.as_ref() {
+            req.bearer_auth(t)
+        } else {
+            req
+        }
+    };
+
+    match action.as_str() {
+        "list" => {
+            let req = with_auth(client.get(format!("{}/api/v1/agents", base_url)));
+            let res = req
+                .send()
+                .await
+                .map_err(|e| AgentError::Io(format!("cloud list request failed: {}", e)))?;
+            if !res.status().is_success() {
+                let status = res.status();
+                let body = res.text().await.unwrap_or_default();
+                return Err(AgentError::Io(format!(
+                    "cloud list failed ({}): {}",
+                    status, body
+                )));
+            }
+            let data: serde_json::Value = res
+                .json()
+                .await
+                .map_err(|e| AgentError::Io(format!("cloud list JSON parse failed: {}", e)))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                );
+                return Ok(());
+            }
+            let items = if let Some(arr) = data.as_array() {
+                arr.clone()
+            } else {
+                data.get("sessions")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            println!(
+                "Cloud agents: {} (showing up to {})",
+                items.len().min(limit as usize),
+                limit
+            );
+            for item in items.into_iter().take(limit as usize) {
+                let id = item
+                    .get("session_id")
+                    .or_else(|| item.get("agent_id"))
+                    .or_else(|| item.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+                let model = item.get("model").and_then(|v| v.as_str()).unwrap_or("-");
+                let updated = item
+                    .get("updated_at")
+                    .or_else(|| item.get("last_activity_at"))
+                    .or_else(|| item.get("last_active_at"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                println!("  • {}  status={}  model={}  updated={}", id, status, model, updated);
+            }
+            Ok(())
+        }
+        "status" => {
+            let id = agent_id.ok_or_else(|| {
+                AgentError::Config("Missing --agent-id. Usage: hermes cloud status --agent-id <id>".into())
+            })?;
+            let req = with_auth(client.get(format!("{}/api/v1/agents/{}/status", base_url, id)));
+            let res = req
+                .send()
+                .await
+                .map_err(|e| AgentError::Io(format!("cloud status request failed: {}", e)))?;
+            if !res.status().is_success() {
+                let status = res.status();
+                let body = res.text().await.unwrap_or_default();
+                return Err(AgentError::Io(format!(
+                    "cloud status failed ({}): {}",
+                    status, body
+                )));
+            }
+            let data: serde_json::Value = res
+                .json()
+                .await
+                .map_err(|e| AgentError::Io(format!("cloud status JSON parse failed: {}", e)))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                );
+            } else {
+                println!(
+                    "Cloud agent status ({}): {}",
+                    id,
+                    data.get("status")
+                        .or_else(|| data.get("session").and_then(|v| v.get("status")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                );
+            }
+            Ok(())
+        }
+        "exec" => {
+            let prompt = prompt.ok_or_else(|| {
+                AgentError::Config(
+                    "Missing prompt. Usage: hermes cloud exec --agent-id <id> \"your task\"".into(),
+                )
+            })?;
+            if let Some(n) = attempts {
+                if !(1..=4).contains(&n) {
+                    return Err(AgentError::Config("--attempts must be between 1 and 4".into()));
+                }
+            }
+            if env.is_some() || attempts.is_some() {
+                println!(
+                    "Note: --env/--attempts are accepted for Codex-style parity; this server may ignore them unless implemented."
+                );
+            }
+
+            let target_agent_id = if let Some(id) = agent_id {
+                id
+            } else {
+                let create_body = serde_json::json!({
+                    "branch": "main",
+                    "workspace_mode": "blank",
+                    "startup_commands": []
+                });
+                let req = with_auth(client.post(format!("{}/api/v1/agents", base_url)).json(&create_body));
+                let res = req.send().await.map_err(|e| {
+                    AgentError::Io(format!("cloud exec create-agent request failed: {}", e))
+                })?;
+                if !res.status().is_success() {
+                    let status = res.status();
+                    let body = res.text().await.unwrap_or_default();
+                    return Err(AgentError::Io(format!(
+                        "cloud exec create-agent failed ({}): {}",
+                        status, body
+                    )));
+                }
+                let data: serde_json::Value = res.json().await.map_err(|e| {
+                    AgentError::Io(format!("cloud exec create-agent JSON parse failed: {}", e))
+                })?;
+                data.get("session_id")
+                    .or_else(|| data.get("agent_id"))
+                    .or_else(|| data.get("id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AgentError::Io(
+                            "cloud exec create-agent returned no session_id/agent_id/id".into(),
+                        )
+                    })?
+                    .to_string()
+            };
+
+            let body = serde_json::json!({
+                "text": prompt
+            });
+            let req = with_auth(
+                client
+                    .post(format!("{}/api/v1/agents/{}/messages", base_url, target_agent_id))
+                    .json(&body),
+            );
+            let res = req
+                .send()
+                .await
+                .map_err(|e| AgentError::Io(format!("cloud exec request failed: {}", e)))?;
+            if !res.status().is_success() {
+                let status = res.status();
+                let body = res.text().await.unwrap_or_default();
+                return Err(AgentError::Io(format!(
+                    "cloud exec failed ({}): {}",
+                    status, body
+                )));
+            }
+            let data: serde_json::Value = res
+                .json()
+                .await
+                .map_err(|e| AgentError::Io(format!("cloud exec JSON parse failed: {}", e)))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                );
+            } else {
+                println!("Cloud exec submitted to agent: {}", target_agent_id);
+                if let Some(text) = data
+                    .get("text")
+                    .or_else(|| data.get("reply"))
+                    .and_then(|v| v.as_str())
+                {
+                    println!("\n{}", text);
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+                    );
+                }
+            }
+            Ok(())
+        }
+        other => Err(AgentError::Config(format!(
+            "Unknown cloud action: {}. Use 'list', 'exec', or 'status'.",
+            other
+        ))),
     }
 }
 

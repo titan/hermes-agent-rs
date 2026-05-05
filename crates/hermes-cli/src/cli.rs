@@ -8,6 +8,7 @@
 //! hermes                          # interactive REPL (default)
 //! hermes chat                     # single-shot query
 //! hermes serve                    # API server + gateway + cron
+//! hermes cloud                    # cloud task workflows (list/exec/status)
 //! hermes gateway                  # platform gateway only (no API)
 //! hermes config                   # configuration management
 //! hermes model                    # model / provider management
@@ -80,6 +81,35 @@ pub enum CliCommand {
         /// Disable cron subsystem.
         #[arg(long)]
         no_cron: bool,
+    },
+
+    /// Interact with cloud tasks from the terminal.
+    ///
+    /// Examples:
+    ///   hermes cloud                           — list recent cloud agents
+    ///   hermes cloud list --limit 20          — list recent cloud agents
+    ///   hermes cloud exec --agent-id <id> "Fix lint errors"
+    ///   hermes cloud status --agent-id <id>   — get cloud agent status
+    Cloud {
+        /// Action: "list", "exec", or "status" (defaults to "list").
+        action: Option<String>,
+        /// Target cloud agent id (required for status, optional for exec).
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Prompt used with "exec".
+        prompt: Option<String>,
+        /// Target cloud environment id (parity placeholder).
+        #[arg(long)]
+        env: Option<String>,
+        /// Best-of-N attempt count for cloud execution (1-4, parity placeholder).
+        #[arg(long)]
+        attempts: Option<u8>,
+        /// Max rows for "list".
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Print raw JSON output.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Start or manage the platform gateway (no API server).
@@ -436,6 +466,43 @@ mod tests {
                 assert!(no_cron);
             }
             _ => panic!("Expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_cloud_exec() {
+        let cli = Cli::try_parse_from(vec![
+            "hermes",
+            "cloud",
+            "exec",
+            "--agent-id",
+            "agent-123",
+            "--env",
+            "staging",
+            "--attempts",
+            "2",
+            "run regression checks",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::Cloud {
+                action,
+                agent_id,
+                prompt,
+                env,
+                attempts,
+                limit,
+                json,
+            }) => {
+                assert_eq!(action.as_deref(), Some("exec"));
+                assert_eq!(agent_id.as_deref(), Some("agent-123"));
+                assert_eq!(prompt.as_deref(), Some("run regression checks"));
+                assert_eq!(env.as_deref(), Some("staging"));
+                assert_eq!(attempts, Some(2));
+                assert_eq!(limit, 20);
+                assert!(!json);
+            }
+            _ => panic!("Expected Cloud command"),
         }
     }
 
